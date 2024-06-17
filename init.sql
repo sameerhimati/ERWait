@@ -1,3 +1,6 @@
+drop table if exists hospital_pages cascade;
+drop table if exists hospital_wait_times cascade;
+
 CREATE TABLE hospital_pages (
     id SERIAL PRIMARY KEY,
     hospital_name VARCHAR(255),
