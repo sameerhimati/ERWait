@@ -32,7 +32,7 @@ def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num,
                     "You are an assistant that extracts hospital names, addresses, and wait times from images. "
                     "Your output should be in the following format: "
                     "Hospital Name: <hospital_name>, Address: <hospital_address>, Wait Time: <wait_time>. "
-                    f"This page belongs to the hospital network {network_name}, and you need to extract information for {hospital_num} hospitals. If you don't find an address, please leave it blank. Same with any other information. "
+                    f"This page belongs to the hospital network {network_name}, and you need to extract information for {hospital_num} hospitals.  If you don't find an address, please leave it blank. Same with any other information. "
                 )
             },
             {
@@ -58,17 +58,19 @@ def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num,
     response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
     if response.status_code == 200:
         extracted_data = response.json()['choices'][0]['message']['content']
-        return [tuple(item.split(',')) for item in extracted_data.split('\n') if item]
+        logger.debug(f"Extracted data type: {type(extracted_data)}")
+        logger.debug(f"Extracted data: {extracted_data}")
+        return extracted_data
     else:
         logger.error("Error from OpenAI API: %s", response.json())
-        return []
-    
+        return ""
+
 def parse_extracted_data(extracted_data):
     wait_times = []
 
     # Check if extracted_data is a list or string and handle accordingly
     if isinstance(extracted_data, list):
-        extracted_data = '\n'.join(extracted_data)
+        extracted_data = '\n'.join(map(str, extracted_data))
 
     for line in extracted_data.split('\n'):
         if line.strip():
@@ -78,7 +80,6 @@ def parse_extracted_data(extracted_data):
             except ValueError as e:
                 logger.error("Error parsing line: %s; error: %s", line, e)
     return wait_times
-
 
 def main():
     rows = fetch_hospital_data()
