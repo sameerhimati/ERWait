@@ -4,6 +4,9 @@ import cv2
 import base64
 import requests
 from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 from fetch_data import fetch_hospital_data
 from config import OPENAI_API_KEY, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 import psycopg2
@@ -32,7 +35,8 @@ def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num,
                     "You are an assistant that extracts hospital names, addresses, and wait times from images. "
                     "Your output should be in the following format: "
                     "Hospital Name: <hospital_name>, Address: <hospital_address>, Wait Time: <wait_time>. "
-                    f"This page belongs to the hospital network {network_name}, and you need to extract information for {hospital_num} hospitals.  If you don't find an address, please leave it blank. Same with any other information. "
+                    f"This page belongs to the hospital network {network_name}, and you need to extract information for {hospital_num} hospitals. "
+                    "If you don't find an address, please leave it blank. Same with any other information."
                 )
             },
             {
@@ -75,11 +79,34 @@ def parse_extracted_data(extracted_data):
     for line in extracted_data.split('\n'):
         if line.strip():
             try:
-                hospital_name, hospital_address, wait_time = line.split(',', 2)
-                wait_times.append((hospital_name.strip(), hospital_address.strip(), wait_time.strip()))
+                parts = line.split(',', 2)
+                hospital_name = parts[0].split("Hospital Name:")[-1].strip()
+                hospital_address = parts[1].split("Address:")[-1].strip() if len(parts) > 2 else ""
+                wait_time = parts[-1].split("Wait Time:")[-1].strip()
+                wait_times.append((hospital_name, hospital_address, wait_time))
             except ValueError as e:
                 logger.error("Error parsing line: %s; error: %s", line, e)
     return wait_times
+
+def capture_full_page_screenshot(driver):
+    # Get the total height of the page
+    total_height = driver.execute_script("return document.body.scrollHeight")
+    viewport_height = driver.execute_script("return window.innerHeight")
+    stitched_image = None
+
+    for y in range(0, total_height, viewport_height):
+        driver.execute_script(f"window.scrollTo(0, {y});")
+        time.sleep(1)  # Wait for the scroll action to complete
+        screenshot = driver.get_screenshot_as_png()
+        np_image = np.frombuffer(screenshot, np.uint8)
+        img = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
+
+        if stitched_image is None:
+            stitched_image = img
+        else:
+            stitched_image = np.vstack((stitched_image, img))
+
+    return stitched_image
 
 def main():
     rows = fetch_hospital_data()
@@ -107,19 +134,16 @@ def main():
                 driver.get(url)
                 time.sleep(5)  # Wait for the page to load completely
 
-                # Take a screenshot
-                png = driver.get_screenshot_as_png()
-                logger.debug(f"Captured screenshot for URL: {url}")
-
-                # Convert the screenshot to OpenCV format
-                np_image = np.frombuffer(png, np.uint8)
-                img = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
+                # Capture the full-page screenshot
+                img = capture_full_page_screenshot(driver)
+                logger.debug(f"Captured full-page screenshot for URL: {url}")
 
                 # Encode the image to base64
                 base64_image = encode_image(img)
 
                 # Extract wait times using OpenAI API
                 extracted_data = get_wait_times_from_image(OPENAI_API_KEY, base64_image, network_name, hospital_num, detail='high')
+
                 wait_times = parse_extracted_data(extracted_data)
 
                 if not wait_times:
