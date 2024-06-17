@@ -3,24 +3,26 @@ import numpy as np
 import cv2
 from selenium import webdriver
 import openai
-from fetch_data.py import fetch_hospital_data
+from fetch_data import fetch_hospital_data
 from config import OPENAI_API_KEY, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 import psycopg2
 
 openai.api_key = OPENAI_API_KEY
 
-def get_wait_time_from_text(text):
+def get_wait_times_from_text(text):
     response = openai.Completion.create(
         model="gpt-4",
-        prompt=f"Extract the wait time from the following text:\n{text}\nWait time:",
-        max_tokens=10
+        prompt=f"Extract all hospital names, addresses, and their corresponding wait times from the following text:\n{text}\nProvide the details in the format: Hospital Name, Hospital Address, Wait Time",
+        max_tokens=500  # Adjust as needed
     )
-    return response.choices[0].text.strip()
+    extracted_data = response.choices[0].text.strip()
+    # Assuming the data is returned in a structured format, e.g., as a list of tuples
+    return [tuple(item.split(',')) for item in extracted_data.split('\n') if item]
 
 def main():
     rows = fetch_hospital_data()
 
-    driver = webdriver.Chrome(executable_path='/path/to/chromedriver')
+    driver = webdriver.Chrome() # executable_path='/usr/local/bin/chromedriver'
 
     conn = psycopg2.connect(
         dbname=DB_NAME,
@@ -32,7 +34,7 @@ def main():
     cursor = conn.cursor()
 
     for row in rows:
-        url, hospital_name, hospital_address = row
+        url, hospital_name, hospital_num = row
         driver.get(url)
         time.sleep(5)  # Wait for the page to load completely
 
@@ -51,15 +53,16 @@ def main():
         )
         extracted_text = response.choices[0].text
 
-        # Extract wait time from the text using GPT-4
-        wait_time = get_wait_time_from_text(extracted_text)
+        # Extract wait times from the text using GPT-4
+        wait_times = get_wait_times_from_text(extracted_text)
 
         # Store extracted data into PostgreSQL database
-        cursor.execute(
-            "INSERT INTO hospital_wait_times (hospital_name, hospital_address, wait_time) VALUES (%s, %s, %s)",
-            (hospital_name, hospital_address, wait_time)
-        )
-        conn.commit()
+        for hospital_name, hospital_address, wait_time in wait_times:
+            cursor.execute(
+                "INSERT INTO hospital_wait_times (hospital_name, hospital_address, wait_time) VALUES (%s, %s, %s)",
+                (hospital_name.strip(), hospital_address.strip(), wait_time.strip())
+            )
+            conn.commit()
 
     driver.quit()
     conn.close()
