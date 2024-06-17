@@ -11,3 +11,6 @@ venv/
 
 # MacOS specific files
 .DS_Store
+
+# Other files
+*.log

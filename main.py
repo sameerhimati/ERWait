@@ -1,71 +1,152 @@
 import time
 import numpy as np
 import cv2
+import base64
+import requests
 from selenium import webdriver
-import openai
 from fetch_data import fetch_hospital_data
 from config import OPENAI_API_KEY, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 import psycopg2
+from logger_setup import logger
+from dotenv import load_dotenv
+import os
 
-openai.api_key = OPENAI_API_KEY
+load_dotenv()  # Load environment variables from .env
 
-def get_wait_times_from_text(text):
-    response = openai.Completion.create(
-        model="gpt-4",
-        prompt=f"Extract all hospital names, addresses, and their corresponding wait times from the following text:\n{text}\nProvide the details in the format: Hospital Name, Hospital Address, Wait Time",
-        max_tokens=500  # Adjust as needed
-    )
-    extracted_data = response.choices[0].text.strip()
-    # Assuming the data is returned in a structured format, e.g., as a list of tuples
-    return [tuple(item.split(',')) for item in extracted_data.split('\n') if item]
+def encode_image(image):
+    _, buffer = cv2.imencode('.png', image)
+    return base64.b64encode(buffer).decode('utf-8')
+
+def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num, detail='auto'):
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+
+    payload = {
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are an assistant that extracts hospital names, addresses, and wait times from images. "
+                    "Your output should be in the following format: "
+                    "Hospital Name: <hospital_name>, Address: <hospital_address>, Wait Time: <wait_time>. "
+                    f"This page belongs to the hospital network {network_name}, and you need to extract information for {hospital_num} hospitals. If you don't find an address, please leave it blank. Same with any other information. "
+                )
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Please extract all hospital names, addresses, and their corresponding wait times from the image."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{base64_image}",
+                            "detail": detail
+                        }
+                    }
+                ]
+            }
+        ],
+        "max_tokens": 1500
+    }
+
+    response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+    if response.status_code == 200:
+        extracted_data = response.json()['choices'][0]['message']['content']
+        return [tuple(item.split(',')) for item in extracted_data.split('\n') if item]
+    else:
+        logger.error("Error from OpenAI API: %s", response.json())
+        return []
+    
+def parse_extracted_data(extracted_data):
+    wait_times = []
+
+    # Check if extracted_data is a list or string and handle accordingly
+    if isinstance(extracted_data, list):
+        extracted_data = '\n'.join(extracted_data)
+
+    for line in extracted_data.split('\n'):
+        if line.strip():
+            try:
+                hospital_name, hospital_address, wait_time = line.split(',', 2)
+                wait_times.append((hospital_name.strip(), hospital_address.strip(), wait_time.strip()))
+            except ValueError as e:
+                logger.error("Error parsing line: %s; error: %s", line, e)
+    return wait_times
+
 
 def main():
     rows = fetch_hospital_data()
 
-    driver = webdriver.Chrome() # executable_path='/usr/local/bin/chromedriver'
+    try:
+        driver = webdriver.Chrome() # executable_path=os.getenv('CHROMEDRIVER_PATH')
+    except Exception as e:
+        logger.error("Error initializing WebDriver: %s", e)
+        raise
 
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
-    cursor = conn.cursor()
-
-    for row in rows:
-        url, hospital_name, hospital_num = row
-        driver.get(url)
-        time.sleep(5)  # Wait for the page to load completely
-
-        # Take a screenshot
-        png = driver.get_screenshot_as_png()
-
-        # Convert the screenshot to OpenCV format
-        np_image = np.frombuffer(png, np.uint8)
-        img = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
-
-        # Use OpenAI API for image to text
-        encoded_img = cv2.imencode('.png', img)[1].tobytes()
-        response = openai.Image.create(
-            model="gpt-4-vision",
-            images=[encoded_img]
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT
         )
-        extracted_text = response.choices[0].text
+        cursor = conn.cursor()
 
-        # Extract wait times from the text using GPT-4
-        wait_times = get_wait_times_from_text(extracted_text)
+        for row in rows:
+            url, network_name, hospital_num = row
+            try:
+                driver.get(url)
+                time.sleep(5)  # Wait for the page to load completely
 
-        # Store extracted data into PostgreSQL database
-        for hospital_name, hospital_address, wait_time in wait_times:
-            cursor.execute(
-                "INSERT INTO hospital_wait_times (hospital_name, hospital_address, wait_time) VALUES (%s, %s, %s)",
-                (hospital_name.strip(), hospital_address.strip(), wait_time.strip())
-            )
-            conn.commit()
+                # Take a screenshot
+                png = driver.get_screenshot_as_png()
+                logger.debug(f"Captured screenshot for URL: {url}")
 
-    driver.quit()
-    conn.close()
+                # Convert the screenshot to OpenCV format
+                np_image = np.frombuffer(png, np.uint8)
+                img = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
+
+                # Encode the image to base64
+                base64_image = encode_image(img)
+
+                # Extract wait times using OpenAI API
+                extracted_data = get_wait_times_from_image(OPENAI_API_KEY, base64_image, network_name, hospital_num, detail='high')
+                wait_times = parse_extracted_data(extracted_data)
+
+                if not wait_times:
+                    logger.error("No wait times extracted for URL: %s", url)
+                    continue
+
+                # Store extracted data into PostgreSQL database
+                for hospital_name, hospital_address, wait_time in wait_times:
+                    cursor.execute(
+                        "INSERT INTO hospital_wait_times (hospital_name, hospital_address, wait_time) VALUES (%s, %s, %s)",
+                        (hospital_name, hospital_address, wait_time)
+                    )
+                    conn.commit()
+                logger.info(f"Stored wait times for URL: {url}")
+
+            except Exception as e:
+                logger.error("Error processing URL %s: %s", url, e)
+                continue
+
+    except Exception as e:
+        logger.error("Error connecting to the database: %s", e)
+        raise
+
+    finally:
+        if conn:
+            conn.close()
+        driver.quit()
+        logger.info("Closed database connection and WebDriver")
 
 if __name__ == "__main__":
     main()
