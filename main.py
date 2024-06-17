@@ -12,6 +12,7 @@ from config import OPENAI_API_KEY, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PO
 import psycopg2
 from logger_setup import logger
 from dotenv import load_dotenv
+import json
 import os
 
 load_dotenv()  # Load environment variables from .env
@@ -33,10 +34,10 @@ def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num,
                 "role": "system",
                 "content": (
                     "You are an assistant that extracts hospital names, addresses, and wait times from images. "
-                    "Your output should be in the following format: "
-                    "Hospital Name: <hospital_name>, Address: <hospital_address>, Wait Time: <wait_time>. "
+                    "Your output should be in the following JSON format: "
+                    "{\"hospitals\": [{\"hospital_name\": \"<hospital_name>\", \"address\": \"<hospital_address>\", \"wait_time\": \"<wait_time>\"}]}. "
                     f"This page belongs to the hospital network {network_name}, and you need to extract information for {hospital_num} hospitals. "
-                    "If you don't find an address, please leave it blank. Same with any other information."
+                    "If you don't find an address, name or wait time please leave it blank or none type. Output nothing else other than the json."
                 )
             },
             {
@@ -69,34 +70,38 @@ def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num,
         logger.error("Error from OpenAI API: %s", response.json())
         return ""
 
+
 def parse_extracted_data(extracted_data):
     wait_times = []
 
-    # Check if extracted_data is a list or string and handle accordingly
-    if isinstance(extracted_data, list):
-        extracted_data = '\n'.join(map(str, extracted_data))
+    try:
+        # Remove any leading/trailing triple backticks
+        if extracted_data.startswith("```json"):
+            extracted_data = extracted_data[7:]  # Remove "```json\n"
+        if extracted_data.endswith("```"):
+            extracted_data = extracted_data[:-3]  # Remove "```"
 
-    for line in extracted_data.split('\n'):
-        if line.strip():
-            try:
-                parts = line.split(',', 2)
-                hospital_name = parts[0].split("Hospital Name:")[-1].strip()
-                hospital_address = parts[1].split("Address:")[-1].strip() if len(parts) > 2 else ""
-                wait_time = parts[-1].split("Wait Time:")[-1].strip()
-                wait_times.append((hospital_name, hospital_address, wait_time))
-            except ValueError as e:
-                logger.error("Error parsing line: %s; error: %s", line, e)
+        data = json.loads(extracted_data)
+        hospitals = data.get("hospitals", [])
+        for hospital in hospitals:
+            hospital_name = hospital.get("hospital_name", "").strip()
+            hospital_address = hospital.get("address", "").strip()
+            wait_time = hospital.get("wait_time", "").strip()
+            wait_times.append((hospital_name, hospital_address, wait_time))
+    except json.JSONDecodeError as e:
+        logger.error("Error parsing JSON: %s", e)
+
     return wait_times
 
+
 def capture_full_page_screenshot(driver):
-    # Get the total height of the page
     total_height = driver.execute_script("return document.body.scrollHeight")
     viewport_height = driver.execute_script("return window.innerHeight")
     stitched_image = None
 
     for y in range(0, total_height, viewport_height):
         driver.execute_script(f"window.scrollTo(0, {y});")
-        time.sleep(1)  # Wait for the scroll action to complete
+        time.sleep(1)
         screenshot = driver.get_screenshot_as_png()
         np_image = np.frombuffer(screenshot, np.uint8)
         img = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
@@ -112,7 +117,7 @@ def main():
     rows = fetch_hospital_data()
 
     try:
-        driver = webdriver.Chrome() # executable_path=os.getenv('CHROMEDRIVER_PATH')
+        driver = webdriver.Chrome()  # executable_path=os.getenv('CHROMEDRIVER_PATH')
     except Exception as e:
         logger.error("Error initializing WebDriver: %s", e)
         raise
