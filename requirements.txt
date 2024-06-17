@@ -1,0 +1,5 @@
+selenium
+opencv-python-headless
+openai
+psycopg2-binary
+python-dotenv
