@@ -12,11 +12,11 @@ def fetch_hospital_data():
             port=DB_PORT
         )
         cursor = conn.cursor()
-        cursor.execute("SELECT url, hospital_name, hospital_num FROM hospital_pages")
+        cursor.execute("SELECT url, network_name, hospital_num FROM hospital_pages")
         rows = cursor.fetchall()
         conn.close()
-        logger.info("Fetched hospital data successfully")
+        logger.info("Fetched hospital network data successfully")
         return rows
     except Exception as e:
-        logger.error("Error fetching hospital data: %s", e)
+        logger.error("Error fetching hospital network data: %s", e)
         raise

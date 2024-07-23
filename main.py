@@ -9,13 +9,14 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from fetch_data import fetch_hospital_data
 from config import OPENAI_API_KEY, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
+from hospital_search import get_hospital_address_geocoding
 import psycopg2
 from logger_setup import logger
 from dotenv import load_dotenv
 import json
 import os
 
-load_dotenv()  # Load environment variables from .env
+load_dotenv() # Load environment variables from .env
 
 def encode_image(image):
     _, buffer = cv2.imencode('.png', image)
@@ -28,15 +29,16 @@ def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num,
     }
 
     payload = {
-        "model": "gpt-4o-mini",
+        "model": "gpt-4o",
         "messages": [
             {
                 "role": "system",
                 "content": (
-                    "You are an assistant that extracts hospital names, addresses, and wait times from images. "
+                    "You are an assistant that extracts hospital names, addresses, and wait times from screenshots of hospital network websites. "
                     "Your output should be in the following JSON format: "
                     "{\"hospitals\": [{\"hospital_name\": \"<hospital_name>\", \"address\": \"<hospital_address>\", \"wait_time\": \"<wait_time>\"}]}. "
                     f"This page belongs to the hospital network {network_name}, and you need to extract information for {hospital_num} hospitals. "
+                    "The address will sometimes include phone numbers and other information that isnt the address. Make sure to only include the street address. "
                     "If you don't find an address fill it with 'Hospital address not found'. If you don't find a wait time fill it with 'Wait time not found'. "
                     "All out wait times should be in minutes so if the wait time is 30 minutes, it should be written as 30 and if its 1 hour, it should be written as 60. "
                     "All the outputs should be strings. Output nothing else other than the json."
@@ -73,6 +75,15 @@ def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num,
         return ""
 
 
+
+def hospital_search(hospital_name):
+    # Choose one of the following:
+    # return get_hospital_address_web_search(hospital_name)
+    return get_hospital_address_geocoding(hospital_name)
+    # return get_hospital_address_hhs(hospital_name)
+    # return get_hospital_address_langchain(hospital_name)
+    # return get_hospital_address_llama_index(hospital_name)
+
 def parse_extracted_data(extracted_data):
     wait_times = []
 
@@ -88,6 +99,11 @@ def parse_extracted_data(extracted_data):
         for hospital in hospitals:
             hospital_name = hospital.get("hospital_name", "").strip()
             hospital_address = hospital.get("address", "").strip()
+            if hospital_address == "Hospital address not found" or not hospital_address[-3:].isdigit():
+                new_address = hospital_search(hospital_name)
+                if new_address != "Address not found":
+                    hospital_address = new_address
+                # If hospital_search also fails, keep the original address
             wait_time = hospital.get("wait_time", "").strip()
             wait_times.append((hospital_name, hospital_address, wait_time))
     except json.JSONDecodeError as e:
@@ -115,11 +131,13 @@ def capture_full_page_screenshot(driver):
 
     return stitched_image
 
+
+
 def main():
     rows = fetch_hospital_data()
 
     try:
-        driver = webdriver.Chrome()  # executable_path=os.getenv('CHROMEDRIVER_PATH')
+        driver = webdriver.Chrome()
     except Exception as e:
         logger.error("Error initializing WebDriver: %s", e)
         raise
@@ -160,11 +178,11 @@ def main():
                 # Store extracted data into PostgreSQL database
                 for hospital_name, hospital_address, wait_time in wait_times:
                     cursor.execute(
-                        "INSERT INTO hospital_wait_times (hospital_name, hospital_address, wait_time) VALUES (%s, %s, %s)",
-                        (hospital_name, hospital_address, wait_time)
+                        "INSERT INTO hospital_wait_times (hospital_name, hospital_address, wait_time, network_name) VALUES (%s, %s, %s, %s)",
+                        (hospital_name, hospital_address, wait_time, network_name)
                     )
                     conn.commit()
-                logger.info(f"Stored wait times for URL: {url}")
+                logger.info(f"Stored wait times for network: {network_name}")
 
             except Exception as e:
                 logger.error("Error processing URL %s: %s", url, e)
