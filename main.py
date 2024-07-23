@@ -28,7 +28,7 @@ def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num,
     }
 
     payload = {
-        "model": "gpt-4o",
+        "model": "gpt-4o-mini",
         "messages": [
             {
                 "role": "system",
@@ -39,7 +39,7 @@ def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num,
                     f"This page belongs to the hospital network {network_name}, and you need to extract information for {hospital_num} hospitals. "
                     "If you don't find an address fill it with 'Hospital address not found'. If you don't find a wait time fill it with 'Wait time not found'. "
                     "All out wait times should be in minutes so if the wait time is 30 minutes, it should be written as 30 and if its 1 hour, it should be written as 60. "
-                    "Output nothing else other than the json."
+                    "All the outputs should be strings. Output nothing else other than the json."
                 )
             },
             {

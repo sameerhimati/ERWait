@@ -8,3 +8,20 @@ body, html {
     height: 100%;
     width: 100%;
 }
+
+#loading, #error {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: white;
+    padding: 10px;
+    border-radius: 5px;
+    z-index: 1000;
+    display: none;
+}
+
+#error {
+    background: #ffcccc;
+    color: red;
+}
