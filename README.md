@@ -1,83 +1,84 @@
-# HealthGuide: Intelligent Healthcare Navigation Platform
+# ERWAIT - Emergency Room Wait Time Tracker
 
-## Executive Summary
+ERWAIT is a comprehensive web application designed to help users find nearby hospitals, compare emergency room wait times, and access healthcare information easily.
 
-HealthGuide is evolving from an emergency room wait time tracker to a comprehensive health management platform. By leveraging AI and user health data, we aim to revolutionize how individuals navigate the healthcare system, make informed decisions, and manage their health.
+## Features
 
-## The Problem
+- **Hospital Map**: Interactive map showing nearby hospitals with real-time wait time information.
+- **Healthcare Chat**: AI-powered chat system to answer healthcare-related questions.
+- **Treatment Price Comparison**: Tool to compare treatment prices across different healthcare facilities.
 
-- Healthcare system complexity leads to inefficient use of resources
-- Patients struggle to determine appropriate care levels (ER, urgent care, primary care)
-- Lack of personalized health guidance based on individual health records and insurance coverage
+## Project Structure
 
-## Our Solution
+```
+ERWAIT/
+├── backend/              # Backend Python code
+│   ├── helpers/          # Helper functions and utilities
+│   ├── api.py            # Flask API endpoints
+│   ├── chat_service.py   # Chat functionality
+│   ├── main.py           # Main application entry point
+│   └── price_comparison_service.py  # Price comparison logic
+├── frontend/             # Frontend web files
+│   ├── css/              # Stylesheets
+│   ├── js/               # JavaScript files
+│   └── *.html            # HTML pages
+├── venv/                 # Python virtual environment
+├── .env                  # Environment variables
+├── .gitignore            # Git ignore file
+├── README.md             # Project documentation
+└── requirements.txt      # Python dependencies
+```
 
-HealthGuide: An AI-powered health management platform that provides personalized guidance, streamlines access to care, and optimizes healthcare resource utilization.
+## Setup and Installation
 
-## Market Opportunity
+1. Clone the repository:
+   ```
+   git clone https://github.com/your-username/ERWAIT.git
+   cd ERWAIT
+   ```
 
-- US Healthcare IT Market Size: $68.11 billion in 2020, expected to reach $396.76 billion by 2028 (CAGR of 19.7%)
-- Growing demand for telemedicine and personalized healthcare solutions
-- Increasing focus on preventive care and health management
+2. Set up a Python virtual environment:
+   ```
+   python -m venv venv
+   source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
+   ```
 
-## Feature Roadmap
+3. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
 
-### Phase 1: Foundation (Months 1-6)
-1. Emergency Room Wait Times and Navigation
-   - Real-time ER wait time tracking
-   - Directions to nearest hospitals
-   - Traffic-aware travel time estimates
+4. Set up environment variables:
+   - Copy `.env.example` to `.env` and fill in the required values.
 
-2. Local Health Resources Directory
-   - Nearby pharmacies, urgent care centers, and specialist clinics
-   - Operating hours, services, and contact information
-   - Insurance acceptance filters
+5. Initialize the database:
+   ```
+   python backend/helpers/init.sql
+   ```
 
-### Phase 2: Health Management Expansion (Months 7-12)
-3. Symptom Checker and Care Guidance
-   - AI-powered symptom assessment
-   - Recommendations for appropriate care level (ER, urgent care, primary care)
-   - Integration with ER wait times for seamless user experience
+6. Run the application:
+   ```
+   python backend/main.py
+   ```
 
-4. Insurance Information Center
-   - Secure storage of user insurance details
-   - In-network provider directory
-   - Basic insurance term explanations and process guides
+7. Open a web browser and navigate to `http://localhost:5000` to access the application.
 
-5. Health Record Storage and Sharing
-   - Secure storage of personal health records
-   - Easy sharing with healthcare providers
-   - Automatic reminders for check-ups and screenings
+## Usage
 
-### Phase 3: AI Integration and Personalization (Months 13-24)
-6. HealthGuide AI Assistant
-   - Natural language processing for health-related queries
-   - Personalized responses based on user's health records and insurance
-   - Contextual understanding for accurate care recommendations
+- Use the navigation menu to switch between different features:
+  - Hospital Map: View nearby hospitals and their wait times.
+  - Healthcare Chat: Ask health-related questions and get AI-powered responses.
+  - Treatment Price Comparison: Compare prices for specific treatments across different facilities.
 
-7. Telemedicine Integration
-   - Partnerships with telemedicine providers
-   - In-app video consultation capabilities
-   - AI-assisted pre-screening to optimize doctor-patient interactions
+## Contributing
 
-## Revenue Streams
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-1. Freemium Model: Basic features free, advanced features behind paywall
-2. Partnerships with healthcare providers and insurance companies
-3. Commission from telemedicine consultations
-4. Data insights (anonymized and aggregated) for healthcare industry
+## License
 
-## Future Growth Opportunities
+This project is licensed under the MIT License - see the LICENSE file for details.
 
-- International expansion
-- Integration with wearable devices for real-time health monitoring
-- Predictive health analytics using machine learning
-- Blockchain integration for secure health data management
+## Acknowledgements
 
-## Funding Needs
-
-1. Accelerate product development
-2. Expand our team (focus on AI and healthcare expertise)
-3. Establish key partnerships in the healthcare industry
-4. Launch marketing campaigns to drive user acquisition
-
+- OpenAI for providing the GPT model used in the healthcare chat feature.
+- Google Maps for the mapping functionality.
