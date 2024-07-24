@@ -1,5 +1,5 @@
 import psycopg2
-from config import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
+from helpers.config import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 from logger_setup import logger
 
 def fetch_hospital_data():

@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hospital Map | Healthcare Services</title>
+    <link rel="stylesheet" href="/frontend/css/styles.css">
+    <link rel="stylesheet" href="/frontend/css/map.css">
+    <script src="https://maps.googleapis.com/maps/api/js?key={{GOOGLE_MAPS_API_KEY}}&libraries=places"></script>
+</head>
+<body>
+    <nav>
+        <ul>
+            <li><a href="/frontend/index.html">Home</a></li>
+            <li><a href="/frontend/map.html">Hospital Map</a></li>
+            <li><a href="/frontend/chat.html">Healthcare Chat</a></li>
+            <li><a href="/frontend/price-comparison.html">Treatment Price Comparison</a></li>
+        </ul>
+    </nav>
+    <main>
+        <h1>Hospital Map</h1>
+        <div id="map"></div>
+        <div id="loading" style="display: none;">Loading...</div>
+        <div id="error" style="display: none;"></div>
+    </main>
+    <script src="/frontend/js/main.js"></script>
+</body>
+</html>

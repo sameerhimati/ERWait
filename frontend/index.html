@@ -1,19 +1,92 @@
+<!-- index.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hospital Wait Times</title>
-    <link rel="stylesheet" href="styles.css">
+    <title>Healthcare Services</title>
+    <link rel="stylesheet" href="/frontend/css/styles.css">
+</head>
+<body>
+    <nav>
+        <ul>
+            <li><a href="/frontend/map.html">Hospital Map</a></li>
+            <li><a href="/frontend/chat.html">Healthcare Chat</a></li>
+            <li><a href="/frontend/price-comparison.html">Treatment Price Comparison</a></li>
+        </ul>
+    </nav>
+    <main>
+        <h1>Welcome to Healthcare Services</h1>
+        <p>Choose a service from the navigation menu above.</p>
+    </main>
+</body>
+</html>
+
+<!-- map.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hospital Map</title>
+    <link rel="stylesheet" href="/frontend/css/styles.css">
+    <script src="https://maps.googleapis.com/maps/api/js?key={{GOOGLE_MAPS_API_KEY}}&libraries=places"></script>
 </head>
 <body>
     <div id="map"></div>
-
     <div id="loading" style="display: none;">Loading...</div>
     <div id="error" style="display: none;"></div>
+    <script src="/frontend/js/main.js"></script>
+</body>
+</html>
 
-    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
-    <script src="https://maps.googleapis.com/maps/api/js?key={{GOOGLE_MAPS_API_KEY}}&libraries=places,geometry,directions&callback=initMap" async defer></script>
-    <script src="script.js"></script>
+<!-- chat.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Healthcare Chat</title>
+    <link rel="stylesheet" href="/frontend/css/styles.css">
+    <link rel="stylesheet" href="/frontend/css/chat.css">
+</head>
+<body>
+    <nav>
+        <!-- Add navigation menu items -->
+    </nav>
+    <main id="chat-container">
+        <div id="chat-messages"></div>
+        <form id="chat-form">
+            <input type="text" id="user-input" placeholder="Ask a healthcare question...">
+            <button type="submit">Send</button>
+        </form>
+    </main>
+    <script src="/frontend/js/chat.js"></script>
+</body>
+</html>
+
+<!-- price-comparison.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Treatment Price Comparison</title>
+    <link rel="stylesheet" href="/frontend/css/styles.css">
+    <link rel="stylesheet" href="/frontend/css/price-comparison.css">
+</head>
+<body>
+    <nav>
+        <!-- Add navigation menu items -->
+    </nav>
+    <main id="price-comparison-container">
+        <form id="price-comparison-form">
+            <input type="text" id="zip-code" placeholder="Enter ZIP code">
+            <input type="text" id="treatment" placeholder="Enter treatment name">
+            <button type="submit">Compare Prices</button>
+        </form>
+        <div id="results-container"></div>
+    </main>
+    <script src="/frontend/js/price-comparison.js"></script>
 </body>
 </html>

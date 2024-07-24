@@ -1,10 +1,12 @@
 from flask import Flask, jsonify, send_from_directory, send_file, request, render_template_string
 from flask_cors import CORS
 import psycopg2
-from config import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, GOOGLE_MAPS_API_KEY
+from helpers.config import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, GOOGLE_MAPS_API_KEY
 import os
 import googlemaps
 import logging
+from chat_service import get_chat_response
+from price_comparison_service import get_price_comparison
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -53,6 +55,19 @@ def serve_static(path):
         return send_from_directory(app.static_folder, path)
     else:
         return "File not found", 404
+    
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    user_input = request.json.get('message')
+    response = get_chat_response(user_input)
+    return jsonify({"response": response})
+
+@app.route('/api/price-comparison', methods=['POST'])
+def price_comparison():
+    zip_code = request.json.get('zipCode')
+    treatment = request.json.get('treatment')
+    results = get_price_comparison(zip_code, treatment)
+    return jsonify(results)
 
 @app.route('/api/hospitals', methods=['GET'])
 def get_hospitals():

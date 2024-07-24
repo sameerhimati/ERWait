@@ -7,9 +7,9 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
-from fetch_data import fetch_hospital_data
-from config import OPENAI_API_KEY, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
-from hospital_search import get_hospital_address_geocoding
+from helpers.fetch_data import fetch_hospital_data
+from helpers.config import OPENAI_API_KEY, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
+from helpers.hospital_search import get_hospital_address_geocoding
 import psycopg2
 from logger_setup import logger
 from dotenv import load_dotenv

@@ -1,3 +1,9 @@
+// main.js
+
+// Define the API URL
+const API_URL = '/api';
+
+// Map functionality
 let map, userMarker, markers = [];
 let currentInfoWindow = null;
 
@@ -20,8 +26,6 @@ function initMap() {
         searchBox.setBounds(map.getBounds());
     });
 
-    // Listen for the event fired when the user selects a prediction and retrieve
-    // more details for that place.
     searchBox.addListener("places_changed", () => {
         const places = searchBox.getPlaces();
 
@@ -29,7 +33,6 @@ function initMap() {
             return;
         }
 
-        // For each place, get the icon, name and location.
         const bounds = new google.maps.LatLngBounds();
         places.forEach((place) => {
             if (!place.geometry || !place.geometry.location) {
@@ -38,13 +41,19 @@ function initMap() {
             }
 
             if (place.geometry.viewport) {
-                // Only geocodes have viewport.
                 bounds.union(place.geometry.viewport);
             } else {
                 bounds.extend(place.geometry.location);
             }
         });
         map.fitBounds(bounds);
+    });
+
+    map.addListener('click', () => {
+        if (currentInfoWindow) {
+            currentInfoWindow.close();
+            currentInfoWindow = null;
+        }
     });
 
     getUserLocation();
@@ -87,8 +96,11 @@ async function fetchHospitalData() {
     showLoading();
     hideError();
     try {
-        const response = await axios.get('/api/hospitals');
-        const hospitals = response.data;
+        const response = await fetch(`${API_URL}/hospitals`);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const hospitals = await response.json();
         addMarkersToMap(hospitals);
     } catch (error) {
         console.error('Error fetching hospital data:', error);
@@ -132,7 +144,8 @@ function addMarkersToMap(hospitals) {
                 `
             });
 
-            marker.addListener('mouseover', () => {
+            marker.addListener('click', (event) => {
+                event.stop();
                 if (currentInfoWindow) {
                     currentInfoWindow.close();
                 }
@@ -141,14 +154,6 @@ function addMarkersToMap(hospitals) {
                 if (userMarker) {
                     getTravelTime(userMarker.getPosition(), marker.getPosition(), hospital.name);
                 }
-            });
-
-            marker.addListener('mouseout', () => {
-                setTimeout(() => {
-                    if (!infoWindow.getMap()) return;
-                    infoWindow.close();
-                    currentInfoWindow = null;
-                }, 1000);
             });
 
             markers.push(marker);
@@ -214,6 +219,10 @@ function getDirections(lat, lon) {
         directionsService.route(request, function(result, status) {
             if (status === 'OK') {
                 directionsRenderer.setDirections(result);
+                if (currentInfoWindow) {
+                    currentInfoWindow.close();
+                    currentInfoWindow = null;
+                }
             } else {
                 showError("Unable to get directions. Please try again.");
             }
@@ -241,4 +250,120 @@ function hideError() {
     document.getElementById('error').style.display = 'none';
 }
 
+// Chat functionality
+function initChat() {
+    const chatForm = document.getElementById('chat-form');
+    if (chatForm) {
+        chatForm.addEventListener('submit', handleChatSubmit);
+    }
+}
+
+async function handleChatSubmit(e) {
+    e.preventDefault();
+    const userInput = document.getElementById('user-input').value;
+    
+    if (!userInput.trim()) return;
+
+    displayChatMessage('user', userInput);
+    document.getElementById('user-input').value = '';
+
+    try {
+        const response = await fetch(`${API_URL}/chat`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ message: userInput }),
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        displayChatMessage('bot', data.response);
+    } catch (error) {
+        console.error('Error:', error);
+        displayChatMessage('bot', 'Sorry, there was an error processing your request.');
+    }
+}
+
+function displayChatMessage(sender, message) {
+    const chatMessages = document.getElementById('chat-messages');
+    const messageElement = document.createElement('div');
+    messageElement.classList.add(sender);
+    messageElement.textContent = message;
+    chatMessages.appendChild(messageElement);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+// Price comparison functionality
+function initPriceComparison() {
+    const priceComparisonForm = document.getElementById('price-comparison-form');
+    if (priceComparisonForm) {
+        priceComparisonForm.addEventListener('submit', handlePriceComparisonSubmit);
+    }
+}
+
+async function handlePriceComparisonSubmit(e) {
+    e.preventDefault();
+    const zipCode = document.getElementById('zip-code').value;
+    const treatment = document.getElementById('treatment').value;
+    
+    if (!zipCode.trim() || !treatment.trim()) {
+        displayPriceComparisonResults({ error: 'Please enter both ZIP code and treatment.' });
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_URL}/price-comparison`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ zipCode, treatment }),
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        displayPriceComparisonResults(data);
+    } catch (error) {
+        console.error('Error:', error);
+        displayPriceComparisonResults({ error: 'Sorry, there was an error processing your request.' });
+    }
+}
+
+function displayPriceComparisonResults(results) {
+    const resultsContainer = document.getElementById('results-container');
+    resultsContainer.innerHTML = ''; // Clear previous results
+    
+    if (results.error) {
+        resultsContainer.textContent = results.error;
+        return;
+    }
+    
+    // Display the results (you'll need to format this based on your data structure)
+    results.forEach(result => {
+        const resultElement = document.createElement('div');
+        resultElement.textContent = `${result.facilityName}: $${result.price}`;
+        resultsContainer.appendChild(resultElement);
+    });
+}
+
+// Initialize all features
+function initAll() {
+    if (document.getElementById('map')) {
+        initMap();
+    }
+    initChat();
+    initPriceComparison();
+}
+
+// Call initAll when the DOM is fully loaded
+document.addEventListener('DOMContentLoaded', initAll);
+
+// Make initMap globally available for the Google Maps API callback
 window.initMap = initMap;
