@@ -35,13 +35,13 @@ def extract_address_with_llm(hospital_name, content):
 
 import requests
 
-def get_hospital_address_geocoding(hospital_name):
+def get_hospital_address_geocoding(hospital_name, network_name=""):
     # Replace with your actual Google Maps API key
     api_key = "your_google_maps_api_key"
     base_url = "https://maps.googleapis.com/maps/api/geocode/json"
     
     params = {
-        "address": hospital_name,
+        "address": network_name + " " + hospital_name,
         "key": api_key
     }
     

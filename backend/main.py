@@ -10,6 +10,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from helpers.fetch_data import fetch_hospital_data
 from helpers.config import OPENAI_API_KEY, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 from helpers.hospital_search import get_hospital_address_geocoding
+from selenium.webdriver.chrome.options import Options
 import psycopg2
 from logger_setup import logger
 from dotenv import load_dotenv
@@ -76,15 +77,15 @@ def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num,
 
 
 
-def hospital_search(hospital_name):
+def hospital_search(hospital_name, network_name):
     # Choose one of the following:
     # return get_hospital_address_web_search(hospital_name)
-    return get_hospital_address_geocoding(hospital_name)
+    return get_hospital_address_geocoding(hospital_name, network_name)
     # return get_hospital_address_hhs(hospital_name)
     # return get_hospital_address_langchain(hospital_name)
     # return get_hospital_address_llama_index(hospital_name)
 
-def parse_extracted_data(extracted_data):
+def parse_extracted_data(extracted_data, network_name):
     wait_times = []
 
     try:
@@ -100,7 +101,7 @@ def parse_extracted_data(extracted_data):
             hospital_name = hospital.get("hospital_name", "").strip()
             hospital_address = hospital.get("address", "").strip()
             if hospital_address == "Hospital address not found" or not hospital_address[-3:].isdigit():
-                new_address = hospital_search(hospital_name)
+                new_address = hospital_search(hospital_name, network_name)
                 if new_address != "Address not found":
                     hospital_address = new_address
                 # If hospital_search also fails, keep the original address
@@ -137,6 +138,10 @@ def main():
     rows = fetch_hospital_data()
 
     try:
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")  # This makes it run without a visible browser window
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
         driver = webdriver.Chrome()
     except Exception as e:
         logger.error("Error initializing WebDriver: %s", e)
@@ -169,7 +174,7 @@ def main():
                 # Extract wait times using OpenAI API
                 extracted_data = get_wait_times_from_image(OPENAI_API_KEY, base64_image, network_name, hospital_num, detail='high')
 
-                wait_times = parse_extracted_data(extracted_data)
+                wait_times = parse_extracted_data(extracted_data, network_name)
 
                 if not wait_times:
                     logger.error("No wait times extracted for URL: %s", url)
