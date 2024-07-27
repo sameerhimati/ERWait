@@ -1,0 +1,12 @@
+{
+    "edward-elmhurst": {
+      "facility_id": "140240",
+      "name": "Edward Hospital",
+      "scraping_url": "https://www.eehealth.org/services/emergency/wait-times/"
+    },
+    "piedmont-atlanta": {
+      "facility_id": "110079",
+      "name": "Piedmont Atlanta Hospital",
+      "scraping_url": "https://www.piedmont.org/emergency-room-wait-times/emergency-room-wait-times"
+    }
+  }

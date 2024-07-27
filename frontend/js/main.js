@@ -57,7 +57,7 @@ function initMap() {
     });
 
     getUserLocation();
-    fetchHospitalData();
+    google.maps.event.addListener(map, 'idle', fetchHospitals);
 }
 
 function getUserLocation() {
@@ -92,40 +92,52 @@ function getUserLocation() {
     }
 }
 
-async function fetchHospitalData() {
+function fetchHospitals() {
     showLoading();
     hideError();
-    try {
-        const response = await fetch(`${API_URL}/hospitals`);
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        const hospitals = await response.json();
-        addMarkersToMap(hospitals);
-    } catch (error) {
-        console.error('Error fetching hospital data:', error);
-        showError('Failed to fetch hospital data. Please try again later.');
-    } finally {
-        hideLoading();
-    }
+
+    const bounds = map.getBounds();
+    const center = bounds.getCenter();
+    const ne = bounds.getNorthEast();
+
+    // Calculate radius in miles
+    const radius = google.maps.geometry.spherical.computeDistanceBetween(center, ne) / 1609.34;
+
+    fetch(`${API_URL}/hospitals?lat=${center.lat()}&lon=${center.lng()}&radius=${radius}`)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(hospitals => {
+            clearMarkers();
+            addMarkersToMap(hospitals);
+            hideLoading();
+        })
+        .catch(error => {
+            console.error('Error fetching hospital data:', error);
+            showError('Failed to fetch hospital data. Please try again later.');
+            hideLoading();
+        });
+}
+
+function clearMarkers() {
+    markers.forEach(marker => marker.setMap(null));
+    markers = [];
 }
 
 function addMarkersToMap(hospitals) {
     hospitals.forEach(hospital => {
-        if (hospital.lat && hospital.lon) {
+        if (hospital.latitude && hospital.longitude) {
             const marker = new google.maps.Marker({
-                position: { lat: hospital.lat, lng: hospital.lon },
+                position: { lat: hospital.latitude, lng: hospital.longitude },
                 map: map,
-                title: hospital.name,
-                label: {
-                    text: hospital.waitTime + ' min',
-                    color: 'white',
-                    fontSize: '12px'
-                },
+                title: hospital.facility_name,
                 icon: {
                     path: google.maps.SymbolPath.CIRCLE,
                     scale: 20,
-                    fillColor: getWaitTimeColor(hospital.waitTime),
+                    fillColor: getWaitTimeColor(hospital.wait_time),
                     fillOpacity: 1,
                     strokeColor: '#ffffff',
                     strokeWeight: 2
@@ -134,13 +146,13 @@ function addMarkersToMap(hospitals) {
 
             const infoWindow = new google.maps.InfoWindow({
                 content: `
-                    <b>${hospital.name}</b><br>
-                    Address: ${hospital.address}<br>
-                    Wait time: ${hospital.waitTime} minutes<br>
-                    Network: ${hospital.networkName}<br>
-                    <a href="${hospital.website}" target="_blank">Visit Website</a><br>
-                    <div id="travel-time-${hospital.name.replace(/\s+/g, '-')}">Calculating travel time...</div>
-                    <button onclick="getDirections(${hospital.lat}, ${hospital.lon})">Get Directions</button>
+                    <b>${hospital.facility_name}</b><br>
+                    Address: ${hospital.address}, ${hospital.city}, ${hospital.state} ${hospital.zip_code}<br>
+                    ${hospital.wait_time ? `Wait time: ${hospital.wait_time} minutes<br>` : ''}
+                    ${hospital.phone_number ? `Phone: ${hospital.phone_number}<br>` : ''}
+                    ${hospital.has_live_wait_time ? '<p>Live wait times available</p>' : ''}
+                    <div id="travel-time-${hospital.facility_id}">Calculating travel time...</div>
+                    <button onclick="getDirections(${hospital.latitude}, ${hospital.longitude})">Get Directions</button>
                 `
             });
 
@@ -152,26 +164,18 @@ function addMarkersToMap(hospitals) {
                 infoWindow.open(map, marker);
                 currentInfoWindow = infoWindow;
                 if (userMarker) {
-                    getTravelTime(userMarker.getPosition(), marker.getPosition(), hospital.name);
+                    getTravelTime(userMarker.getPosition(), marker.getPosition(), hospital.facility_id);
                 }
             });
 
             markers.push(marker);
         } else {
-            console.warn(`Missing coordinates for hospital: ${hospital.name}`);
+            console.warn(`Missing coordinates for hospital: ${hospital.facility_name}`);
         }
     });
-
-    if (markers.length > 0) {
-        const bounds = new google.maps.LatLngBounds();
-        markers.forEach(marker => bounds.extend(marker.getPosition()));
-        map.fitBounds(bounds);
-    } else {
-        console.warn('No valid markers to set bounds');
-    }
 }
 
-function getTravelTime(origin, destination, hospitalName) {
+function getTravelTime(origin, destination, hospitalId) {
     const service = new google.maps.DistanceMatrixService();
     service.getDistanceMatrix(
         {
@@ -187,7 +191,7 @@ function getTravelTime(origin, destination, hospitalName) {
             if (status === 'OK') {
                 const duration = response.rows[0].elements[0].duration_in_traffic.text;
                 const distance = response.rows[0].elements[0].distance.text;
-                document.getElementById(`travel-time-${hospitalName.replace(/\s+/g, '-')}`).innerHTML = 
+                document.getElementById(`travel-time-${hospitalId}`).innerHTML = 
                     `Travel time: ${duration}<br>Distance: ${distance}`;
             } else {
                 console.error('Error fetching travel time:', status);
@@ -197,6 +201,7 @@ function getTravelTime(origin, destination, hospitalName) {
 }
 
 function getWaitTimeColor(waitTime) {
+    if (!waitTime) return '#808080';  // Gray for no data
     const time = parseInt(waitTime);
     if (time <= 15) return '#4CAF50';  // Green
     if (time <= 30) return '#FFC107';  // Yellow

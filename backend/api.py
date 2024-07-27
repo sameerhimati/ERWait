@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, send_from_directory, send_file, request, render_template_string
 from flask_cors import CORS
 import psycopg2
+import psycopg2.extras
 from helpers.config import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, GOOGLE_MAPS_API_KEY
 import os
 import googlemaps
@@ -51,10 +52,11 @@ def geocode():
 
 @app.route('/<path:path>')
 def serve_static(path):
-    if os.path.exists(os.path.join(app.static_folder, path)):
-        return send_from_directory(app.static_folder, path)
-    else:
-        return "File not found", 404
+    return send_from_directory(app.static_folder, path)
+    # if os.path.exists(os.path.join(app.static_folder, path)):
+    #     return send_from_directory(app.static_folder, path)
+    # else:
+    #     return "File not found", 404
     
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -69,58 +71,47 @@ def price_comparison():
     results = get_price_comparison(zip_code, treatment)
     return jsonify(results)
 
+def get_db_connection():
+    return psycopg2.connect(
+        dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
+    )
+
 @app.route('/api/hospitals', methods=['GET'])
 def get_hospitals():
-    try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
-        cursor = conn.cursor()
-        
-        # Join the hospital_wait_times and hospital_pages tables
-        cursor.execute("""
-            SELECT hwt.hospital_name, hwt.hospital_address, hwt.wait_time, hp.url, hwt.network_name
-            FROM hospital_wait_times hwt
-            LEFT JOIN hospital_pages hp ON hwt.network_name = hp.network_name
-        """)
-        rows = cursor.fetchall()
-        conn.close()
+    lat = request.args.get('lat', type=float)
+    lon = request.args.get('lon', type=float)
+    radius = request.args.get('radius', default=10, type=float)
 
-        hospitals = []
-        for row in rows:
-            hospital = {
-                "name": row[0],
-                "address": row[1] if row[1] != "Hospital address not found" else "Address unavailable",
-                "waitTime": row[2],
-                "website": row[3] if row[3] else "#",
-                "networkName": row[4]
-            }
-            if row[1] != "Hospital address not found":
-                coordinates = geocode_address(row[1])
-                if coordinates:
-                    hospital["lat"] = coordinates[0]
-                    hospital["lon"] = coordinates[1]
-            hospitals.append(hospital)
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-        logger.info(f"Processed {len(hospitals)} hospitals")
-        return jsonify(hospitals)
-    except Exception as e:
-        logger.error(f"Error fetching hospital data: {str(e)}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
+    query = """
+    SELECT *
+    FROM hospitals
+    WHERE ST_DWithin(
+        ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography,
+        ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
+        %s * 1609.34  -- Convert miles to meters
+    )
+    """
+    cur.execute(query, (lon, lat, radius))
+    hospitals = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return jsonify(hospitals)
 
 @app.route('/')
 def serve_frontend():
-    with open(os.path.join(app.static_folder, 'index.html'), 'r') as file:
-        html_content = file.read()
+    return send_from_directory(app.static_folder, 'index.html')
+    # with open(os.path.join(app.static_folder, 'index.html'), 'r') as file:
+    #     html_content = file.read()
     
-    # Replace the placeholder with the actual API key
-    html_content = html_content.replace('{{GOOGLE_MAPS_API_KEY}}', GOOGLE_MAPS_API_KEY)
+    # # Replace the placeholder with the actual API key
+    # html_content = html_content.replace('{{GOOGLE_MAPS_API_KEY}}', GOOGLE_MAPS_API_KEY)
     
-    return render_template_string(html_content)
+    # return render_template_string(html_content)
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)

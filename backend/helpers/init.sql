@@ -1,34 +1,43 @@
 -- Drop existing tables if they exist
-DROP TABLE IF EXISTS hospital_pages CASCADE;
-DROP TABLE IF EXISTS hospital_wait_times CASCADE;
+DROP TABLE IF EXISTS hospitals CASCADE;
+DROP TABLE IF EXISTS wait_times CASCADE;
 
--- Create hospital_pages table
-CREATE TABLE hospital_pages (
+-- Create hospitals table
+CREATE TABLE hospitals (
     id SERIAL PRIMARY KEY,
-    hospital_name VARCHAR(255) NOT NULL,
-    url TEXT NOT NULL,
-    hospital_num INTEGER NOT NULL
+    facility_id VARCHAR(50) UNIQUE NOT NULL,
+    website_id VARCHAR(50) UNIQUE,
+    facility_name VARCHAR(255) NOT NULL,
+    address TEXT,
+    city VARCHAR(100),
+    state VARCHAR(2),
+    zip_code VARCHAR(10),
+    county VARCHAR(100),
+    phone_number VARCHAR(20),
+    hospital_type VARCHAR(100),
+    hospital_ownership VARCHAR(100),
+    emergency_services BOOLEAN,
+    has_live_wait_time BOOLEAN DEFAULT FALSE,
+    latitude FLOAT,
+    longitude FLOAT,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create hospital_wait_times table
-CREATE TABLE hospital_wait_times (
+-- Create wait_times table
+CREATE TABLE wait_times (
     id SERIAL PRIMARY KEY,
-    hospital_name VARCHAR(255) NOT NULL,
-    hospital_address VARCHAR(255),
-    wait_time VARCHAR(255),
-    extracted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    hospital_id INTEGER REFERENCES hospitals(id),
+    wait_time INTEGER,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Insert sample data into hospital_pages
-INSERT INTO hospital_pages (hospital_name, url, hospital_num) VALUES
-('Edward Health Elmhurst', 'https://www.eehealth.org/services/emergency/wait-times/', 3),
-('Piedmont', 'https://www.piedmont.org/emergency-room-wait-times/emergency-room-wait-times', 21),
-('Baptist', 'https://www.baptistonline.org/services/emergency', 18),
-('Northern Nevada Sparks', 'https://www.nnmc.com/services/emergency-medicine/er-at-northern-nevada-medical-center', 1),
-('Northern Nevada Reno', 'https://www.nnmc.com/services/emergency-medicine/er-at-mccarran-nw', 1),
-('Northern Nevada Spanish Springs', 'https://www.nnmc.com/services/emergency-medicine/er-at-spanish-springs', 1),
-('Metro Health', 'https://www.metrohealth.org/emergency-room', 4);
+-- Create index for faster geographical queries
+CREATE INDEX idx_hospitals_location ON hospitals USING GIST (
+    ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+);
 
--- Create an index on hospital_name in both tables to improve join performance
-CREATE INDEX idx_hospital_pages_name ON hospital_pages(hospital_name);
-CREATE INDEX idx_hospital_wait_times_name ON hospital_wait_times(hospital_name);
+-- Create index for faster wait time queries
+CREATE INDEX idx_wait_times_hospital_timestamp ON wait_times (hospital_id, timestamp);
+
+-- Create index for website_id lookups
+CREATE INDEX idx_hospitals_website_id ON hospitals(website_id);
