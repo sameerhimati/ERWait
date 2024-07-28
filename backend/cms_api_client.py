@@ -1,12 +1,13 @@
 import csv
 from typing import Dict, List, Any, Optional
-import logging
+# Set up logging
+from logger_setup import logger
 import os
 
 class CMSAPIClient:
     def __init__(self):
         self.csv_path = os.path.join(os.path.dirname(__file__), 'data', 'Hospital_General_Information.csv')
-        self.logger = logging.getLogger(__name__)
+        self.logger = logger
 
     def get_all_hospitals(self) -> List[Dict[str, Any]]:
         """Fetch all hospital data from the CSV file."""

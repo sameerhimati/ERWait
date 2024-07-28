@@ -1,92 +1,52 @@
-<!-- index.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Healthcare Services</title>
-    <link rel="stylesheet" href="/frontend/css/styles.css">
+    <title>HealthGuide</title>
+    <link rel="stylesheet" href="/css/styles.css">
+    <script src="https://maps.googleapis.com/maps/api/js?key={{ google_maps_api_key }}&libraries=places,geometry" defer></script>
+    <script src="/js/main.js" defer></script>
 </head>
 <body>
     <nav>
         <ul>
-            <li><a href="/frontend/map.html">Hospital Map</a></li>
-            <li><a href="/frontend/chat.html">Healthcare Chat</a></li>
-            <li><a href="/frontend/price-comparison.html">Treatment Price Comparison</a></li>
+            <li><a href="#map" class="nav-link" data-page="map">Hospital Map</a></li>
+            <li><a href="#chat" class="nav-link" data-page="chat">Healthcare Chat</a></li>
+            <li><a href="#price-comparison" class="nav-link" data-page="price-comparison">Treatment Price Comparison</a></li>
         </ul>
     </nav>
-    <main>
-        <h1>Welcome to Healthcare Services</h1>
-        <p>Choose a service from the navigation menu above.</p>
-    </main>
-</body>
-</html>
 
-<!-- map.html -->
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hospital Map</title>
-    <link rel="stylesheet" href="/frontend/css/styles.css">
-    <script src="https://maps.googleapis.com/maps/api/js?key={{GOOGLE_MAPS_API_KEY}}&libraries=places"></script>
-</head>
-<body>
-    <div id="map"></div>
-    <div id="loading" style="display: none;">Loading...</div>
-    <div id="error" style="display: none;"></div>
-    <script src="/frontend/js/main.js"></script>
-</body>
-</html>
+    <main id="app">
+        <section id="map-page" class="page">
+            <h1>Hospital Map</h1>
+            <div id="map"></div>
+            <div id="loading" style="display: none;">Loading...</div>
+            <div id="error" style="display: none;"></div>
+        </section>
 
-<!-- chat.html -->
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Healthcare Chat</title>
-    <link rel="stylesheet" href="/frontend/css/styles.css">
-    <link rel="stylesheet" href="/frontend/css/chat.css">
-</head>
-<body>
-    <nav>
-        <!-- Add navigation menu items -->
-    </nav>
-    <main id="chat-container">
-        <div id="chat-messages"></div>
-        <form id="chat-form">
-            <input type="text" id="user-input" placeholder="Ask a healthcare question...">
-            <button type="submit">Send</button>
-        </form>
-    </main>
-    <script src="/frontend/js/chat.js"></script>
-</body>
-</html>
+        <section id="chat-page" class="page" style="display: none;">
+            <h1>Healthcare Chat</h1>
+            <div id="chat-container">
+                <div id="chat-messages"></div>
+                <form id="chat-form">
+                    <input type="text" id="user-input" placeholder="Type your message...">
+                    <button type="submit">Send</button>
+                </form>
+            </div>
+        </section>
 
-<!-- price-comparison.html -->
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treatment Price Comparison</title>
-    <link rel="stylesheet" href="/frontend/css/styles.css">
-    <link rel="stylesheet" href="/frontend/css/price-comparison.css">
-</head>
-<body>
-    <nav>
-        <!-- Add navigation menu items -->
-    </nav>
-    <main id="price-comparison-container">
-        <form id="price-comparison-form">
-            <input type="text" id="zip-code" placeholder="Enter ZIP code">
-            <input type="text" id="treatment" placeholder="Enter treatment name">
-            <button type="submit">Compare Prices</button>
-        </form>
-        <div id="results-container"></div>
+        <section id="price-comparison-page" class="page" style="display: none;">
+            <h1>Treatment Price Comparison</h1>
+            <div id="price-comparison-container">
+                <form id="price-comparison-form">
+                    <input type="text" id="zip-code" placeholder="Enter ZIP code">
+                    <input type="text" id="treatment" placeholder="Enter treatment">
+                    <button type="submit">Compare</button>
+                </form>
+                <div id="results-container"></div>
+            </div>
+        </section>
     </main>
-    <script src="/frontend/js/price-comparison.js"></script>
 </body>
 </html>

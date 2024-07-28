@@ -3,10 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hospital Map | Healthcare Services</title>
-    <link rel="stylesheet" href="/frontend/css/styles.css">
-    <link rel="stylesheet" href="/frontend/css/map.css">
-    <script src="https://maps.googleapis.com/maps/api/js?key={{GOOGLE_MAPS_API_KEY}}&libraries=places"></script>
+    <title>Hospital Map</title>
+    <link rel="stylesheet" href="styles.css">
 </head>
 <body>
     <nav>
@@ -17,12 +15,14 @@
             <li><a href="/frontend/price-comparison.html">Treatment Price Comparison</a></li>
         </ul>
     </nav>
-    <main>
+
+    <main role="main">
         <h1>Hospital Map</h1>
+        <button id="show-all-hospitals">Show All Hospitals</button>
         <div id="map"></div>
-        <div id="loading" style="display: none;">Loading...</div>
-        <div id="error" style="display: none;"></div>
     </main>
-    <script src="/frontend/js/main.js"></script>
+
+    <script src="https://maps.googleapis.com/maps/api/js?key={{GOOGLE_MAPS_API_KEY}}&libraries=geometry"></script>
+    <script src="main.js"></script>
 </body>
 </html>

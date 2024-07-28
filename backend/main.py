@@ -7,18 +7,44 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 import psycopg2
 from psycopg2.extras import execute_values
+from contextlib import contextmanager
 from logger_setup import logger
 from dotenv import load_dotenv
 import json
 import os
-
+from datetime import datetime, timezone
+from helpers.hospital_matching import match_hospitals
 from helpers.fetch_data import fetch_hospital_data
 from helpers.config import OPENAI_API_KEY, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 from helpers.hospital_search import get_hospital_address_geocoding
 from cms_api_client import CMSAPIClient
 from data_processor import HospitalDataProcessor
+from helpers.hospital_matching import match_hospitals
 
 load_dotenv()  # Load environment variables from .env
+
+@contextmanager
+def get_db_cursor():
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT
+        )
+        cursor = conn.cursor()
+        yield cursor
+        conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Database error: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 def encode_image(image):
     _, buffer = cv2.imencode('.png', image)
@@ -41,7 +67,7 @@ def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num,
                     "{\"hospitals\": [{\"hospital_name\": \"<hospital_name>\", \"address\": \"<hospital_address>\", \"wait_time\": \"<wait_time>\"}]}. "
                     f"This page belongs to the hospital network {network_name}, and you need to extract information for {hospital_num} hospitals. "
                     "The address will sometimes include phone numbers and other information that isn't the address. Make sure to only include the street address. "
-                    "If you don't find an address fill it with 'Hospital address not found'. If you don't find a wait time fill it with 'Wait time not found'. "
+                    "If you don't find an address fill it with 'Hospital address not found'. If you don't find a wait time fill it with '0'. It cannot be a string. "
                     "All wait times should be in minutes so if the wait time is 30 minutes, it should be written as 30 and if it's 1 hour, it should be written as 60. "
                     "All the outputs should be strings. Output nothing else other than the json."
                 )
@@ -125,111 +151,213 @@ def capture_full_page_screenshot(driver):
 
     return stitched_image
 
-def sync_cms_data(cursor):
+def get_last_run_time(cursor):
+    cursor.execute("SELECT last_run FROM script_metadata WHERE script_name = 'main_script'")
+    result = cursor.fetchone()
+    if result:
+        last_run = result[0]
+        if last_run.tzinfo is None:
+            last_run = last_run.replace(tzinfo=timezone.utc)
+        return last_run
+    else:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+def update_last_run_time(cursor):
+    current_time = datetime.now(timezone.utc)
+    cursor.execute("""
+        INSERT INTO script_metadata (script_name, last_run)
+        VALUES ('main_script', %s)
+        ON CONFLICT (script_name) DO UPDATE SET last_run = EXCLUDED.last_run
+    """, (current_time,))
+
+def sync_cms_data(cursor, last_run_time):
+    logger.info("Starting CMS data sync")
     cms_client = CMSAPIClient()
     processor = HospitalDataProcessor()
 
+    logger.info("Fetching all hospitals from CMS")
     raw_hospitals = cms_client.get_all_hospitals()
-    processed_hospitals = processor.process_hospitals(raw_hospitals)
+    logger.info(f"Fetched {len(raw_hospitals)} hospitals from CMS")
 
-    execute_values(cursor, """
-        INSERT INTO hospitals (
-            facility_id, website_id, facility_name, address, city, state, zip_code, county,
-            phone_number, emergency_services, has_live_wait_time, latitude, longitude
-        ) VALUES %s
-        ON CONFLICT (facility_id) DO UPDATE SET
-            website_id = EXCLUDED.website_id,
-            facility_name = EXCLUDED.facility_name,
-            address = EXCLUDED.address,
-            city = EXCLUDED.city,
-            state = EXCLUDED.state,
-            zip_code = EXCLUDED.zip_code,
-            county = EXCLUDED.county,
-            phone_number = EXCLUDED.phone_number,
-            emergency_services = EXCLUDED.emergency_services,
-            has_live_wait_time = EXCLUDED.has_live_wait_time,
-            latitude = EXCLUDED.latitude,
-            longitude = EXCLUDED.longitude
-    """, [(
-        h['facility_id'], h.get('website_id'), h['facility_name'], h['address'],
-        h['city'], h['state'], h['zip_code'], h['county'], h['phone_number'],
-        h['emergency_services'], h['has_live_wait_time'], h['latitude'], h['longitude']
-    ) for h in processed_hospitals])
+    logger.info("Processing hospital data")
+    processed_hospitals = processor.process_hospitals(raw_hospitals, last_run_time)
+    logger.info(f"Processed {len(processed_hospitals)} hospitals")
 
+    if processed_hospitals:
+        logger.info("Updating database with processed hospital data")
+        execute_values(cursor, """
+            INSERT INTO hospitals (
+                facility_id, website_id, facility_name, address, city, state, zip_code, county,
+                phone_number, emergency_services, has_live_wait_time, latitude, longitude, last_updated
+            ) VALUES %s
+            ON CONFLICT (facility_id) DO UPDATE SET
+                website_id = EXCLUDED.website_id,
+                facility_name = EXCLUDED.facility_name,
+                address = EXCLUDED.address,
+                city = EXCLUDED.city,
+                state = EXCLUDED.state,
+                zip_code = EXCLUDED.zip_code,
+                county = EXCLUDED.county,
+                phone_number = EXCLUDED.phone_number,
+                emergency_services = EXCLUDED.emergency_services,
+                has_live_wait_time = EXCLUDED.has_live_wait_time,
+                latitude = EXCLUDED.latitude,
+                longitude = EXCLUDED.longitude,
+                last_updated = CURRENT_TIMESTAMP
+        """, [(
+            h['facility_id'], h.get('website_id'), h['facility_name'], h['address'],
+            h['city'], h['state'], h['zip_code'], h['county'], h['phone_number'],
+            h['emergency_services'], h['has_live_wait_time'], h['latitude'], h['longitude'],
+            datetime.now(timezone.utc)
+        ) for h in processed_hospitals])
+        logger.info(f"Updated {cursor.rowcount} hospitals in the database")
+    else:
+        logger.warning("No hospitals to process")
 
-def main():
-    rows = fetch_hospital_data()
-
+    logger.info("CMS data sync completed")
+def update_wait_times(cursor, hospital_name, wait_time):
     try:
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        driver = webdriver.Chrome(options=chrome_options)
+        cursor.execute("""
+            WITH hospital_ids AS (
+                SELECT h.id
+                FROM hospitals h
+                JOIN hospital_page_links hpl ON h.id = hpl.hospital_id
+                JOIN hospital_pages hp ON hpl.hospital_page_id = hp.id
+                WHERE hp.hospital_name = %s
+            )
+            INSERT INTO wait_times (hospital_id, wait_time)
+            SELECT id, %s FROM hospital_ids
+        """, (hospital_name, wait_time))
+        if cursor.rowcount == 0:
+            logger.warning(f"No matching hospital found for {hospital_name}")
+        else:
+            logger.info(f"Updated wait time for {hospital_name}")
     except Exception as e:
-        logger.error("Error initializing WebDriver: %s", e)
+        logger.error(f"Error updating wait time for {hospital_name}: {e}")
         raise
 
-    conn = None
+def populate_hospital_pages(cursor, hospital_pages_data):
+    for name, url, num in hospital_pages_data:
+        cursor.execute("""
+            INSERT INTO hospital_pages (hospital_name, url, hospital_num)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (hospital_name) DO UPDATE SET
+                url = EXCLUDED.url,
+                hospital_num = EXCLUDED.hospital_num
+        """, (name, url, num))
+    logger.info(f"Populated {len(hospital_pages_data)} hospital pages")
+def verify_data_insertion(cursor):
+    cursor.execute("SELECT COUNT(*) FROM hospitals")
+    hospital_count = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM wait_times")
+    wait_time_count = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM hospital_pages")
+    hospital_pages_count = cursor.fetchone()[0]
+    
+    logger.info(f"Data verification: Hospitals: {hospital_count}, Wait Times: {wait_time_count}, Hospital Pages: {hospital_pages_count}")
+
+def main():
+    logger.info("Starting main process")
+    
+    driver = None
     try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
-        cursor = conn.cursor()
+        with get_db_cursor() as cursor:
+            logger.info("Database connection established")
 
-        # Sync CMS data
-        sync_cms_data(cursor)
-        logger.info("Synced CMS data")
+            # Populate hospital_pages table
+            logger.info("Populating hospital_pages table")
+            hospital_pages_data = [
+                ("Edward Health Elmhurst", "https://www.eehealth.org/services/emergency/wait-times/", 3),
+                ("Piedmont", "https://www.piedmont.org/emergency-room-wait-times/emergency-room-wait-times", 21),
+                ("Baptist", "https://www.baptistonline.org/services/emergency", 18),
+                ("Northern Nevada Sparks", "https://www.nnmc.com/services/emergency-medicine/er-at-sparks/", 1),
+                ("Northern Nevada Reno", "https://www.nnmc.com/services/emergency-medicine/er-at-reno/", 1),
+                ("Northern Nevada Spanish", "https://www.nnmc.com/services/emergency-medicine/er-at-spanish/", 1),
+                ("Metro Health", "https://www.metrohealth.org/emergency-room", 4)
+            ]
+            populate_hospital_pages(cursor, hospital_pages_data)
 
-        for row in rows:
-            url, network_name, hospital_num = row
-            try:
-                driver.get(url)
-                time.sleep(5)  # Wait for the page to load completely
+            last_run_time = get_last_run_time(cursor)
+            logger.info(f"Last successful run: {last_run_time}")
 
-                img = capture_full_page_screenshot(driver)
-                logger.debug(f"Captured full-page screenshot for URL: {url}")
+            logger.info("Starting CMS data sync")
+            sync_cms_data(cursor, last_run_time)
+            logger.info("CMS data sync completed")
 
-                base64_image = encode_image(img)
+            logger.info("Matching hospitals")
+            match_hospitals(cursor)
+            logger.info("Hospital matching completed")
 
-                extracted_data = get_wait_times_from_image(OPENAI_API_KEY, base64_image, network_name, hospital_num, detail='high')
+            # Initialize WebDriver
+            logger.info("Initializing WebDriver")
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            driver = webdriver.Chrome(options=chrome_options)
+            logger.info("WebDriver initialized successfully")
 
-                wait_times = parse_extracted_data(extracted_data, network_name)
+            # Fetch hospital pages data
+            logger.info("Fetching hospital pages data")
+            cursor.execute("SELECT hospital_name, url, hospital_num FROM hospital_pages")
+            rows = cursor.fetchall()
+            logger.info(f"Fetched {len(rows)} hospital pages")
 
-                if not wait_times:
-                    logger.error("No wait times extracted for URL: %s", url)
+            for row in rows:
+                hospital_name, url, hospital_num = row
+                logger.info(f"Processing network: {hospital_name}, URL: {url}")
+                try:
+                    driver.get(url)
+                    logger.info(f"Loaded URL: {url}")
+                    time.sleep(5)  # Wait for the page to load completely
+
+                    img = capture_full_page_screenshot(driver)
+                    logger.info(f"Captured full-page screenshot for URL: {url}")
+
+                    base64_image = encode_image(img)
+                    logger.info("Encoded screenshot to base64")
+
+                    extracted_data = get_wait_times_from_image(OPENAI_API_KEY, base64_image, hospital_name, hospital_num, detail='high')
+                    logger.info("Extracted wait times from image")
+
+                    wait_times = parse_extracted_data(extracted_data, hospital_name)
+
+                    if not wait_times:
+                        logger.warning(f"No wait times extracted for URL: {url}")
+                        continue
+
+                    logger.info(f"Updating wait times for network: {hospital_name}")
+                    for hospital_name, _, wait_time in wait_times:
+                        update_wait_times(cursor, hospital_name, wait_time)
+                    logger.info(f"Stored wait times for network: {hospital_name}")
+
+                except Exception as e:
+                    logger.error(f"Error processing URL {url}: {e}")
                     continue
 
-                # Update wait times in the database
-                for hospital_name, hospital_address, wait_time in wait_times:
-                    cursor.execute("""
-                        WITH hospital_id AS (
-                            SELECT id FROM hospitals 
-                            WHERE facility_name = %s AND address = %s
-                        )
-                        INSERT INTO wait_times (hospital_id, wait_time)
-                        SELECT id, %s FROM hospital_id
-                    """, (hospital_name, hospital_address, wait_time))
-                    conn.commit()
-                logger.info(f"Stored wait times for network: {network_name}")
+            logger.info("Updating last run time")
+            update_last_run_time(cursor)
 
-            except Exception as e:
-                logger.error("Error processing URL %s: %s", url, e)
-                continue
+            logger.info("Verifying data insertion")
+            verify_data_insertion(cursor)
+
+        logger.info("All operations completed successfully. Transaction committed.")
 
     except Exception as e:
-        logger.error("Error connecting to the database: %s", e)
+        logger.error(f"Critical error in main process: {e}", exc_info=True)
         raise
 
     finally:
-        if conn:
-            conn.close()
-        driver.quit()
-        logger.info("Closed database connection and WebDriver")
+        if driver:
+            driver.quit()
+            logger.info("Closed WebDriver")
+
+    logger.info("Main process completed")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.critical(f"Unhandled exception in main: {e}", exc_info=True)

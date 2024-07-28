@@ -1,4 +1,3 @@
-/* styles.css */
 body, html {
     height: 100%;
     margin: 0;
@@ -14,11 +13,8 @@ nav {
 nav ul {
     list-style-type: none;
     padding: 0;
-}
-
-nav ul li {
-    display: inline;
-    margin-right: 10px;
+    display: flex;
+    justify-content: space-around;
 }
 
 nav ul li a {
@@ -30,8 +26,12 @@ main {
     padding: 20px;
 }
 
+.page {
+    display: none;
+}
+
 #map {
-    height: 100%;
+    height: 400px;
     width: 100%;
 }
 
@@ -44,7 +44,6 @@ main {
     padding: 10px;
     border-radius: 5px;
     z-index: 1000;
-    display: none;
 }
 
 #error {
@@ -52,45 +51,56 @@ main {
     color: red;
 }
 
-/* chat.css */
-#chat-container {
+#chat-container, #price-comparison-container {
     max-width: 600px;
     margin: 0 auto;
-    padding: 20px;
 }
 
 #chat-messages {
-    height: 400px;
+    height: 300px;
     overflow-y: auto;
     border: 1px solid #ccc;
     padding: 10px;
     margin-bottom: 10px;
 }
 
-#chat-form {
+form {
     display: flex;
+    gap: 10px;
 }
 
-#user-input {
+input[type="text"] {
     flex-grow: 1;
     padding: 5px;
 }
 
-/* price-comparison.css */
-#price-comparison-container {
-    max-width: 600px;
-    margin: 0 auto;
-    padding: 20px;
+button {
+    padding: 5px 10px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    cursor: pointer;
 }
 
-#price-comparison-form {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    margin-bottom: 20px;
+button:hover {
+    background-color: #0056b3;
 }
 
-#results-container {
-    border: 1px solid #ccc;
-    padding: 10px;
+#map {
+    height: 600px; /* Increased from 400px */
+    width: 100%;
+}
+
+#show-all-hospitals {
+    margin-bottom: 10px;
+    padding: 10px 20px;
+    background-color: #4CAF50;
+    color: white;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+}
+
+#show-all-hospitals:hover {
+    background-color: #45a049;
 }
