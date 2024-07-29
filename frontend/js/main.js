@@ -5,6 +5,10 @@ const API_URL = '/api';
 let map, userMarker, markers = [];
 let currentInfoWindow = null;
 
+let currentPage = 1;
+let isLoading = false;
+let hasMoreData = true;
+
 function initializeMap() {
     console.log("Initializing map");
     try {
@@ -19,6 +23,15 @@ function initializeMap() {
         console.error("Error initializing map:", error);
         showError("Failed to initialize the map. Please try refreshing the page.");
     }
+
+    google.maps.event.addListener(map, 'idle', fetchHospitals);
+    google.maps.event.addListener(map, 'zoom_changed', resetPagination);
+}
+
+function resetPagination() {
+    currentPage = 1;
+    clearMarkers();
+    hasMoreData = true;
 }
 
 function getUserLocation() {
@@ -51,6 +64,11 @@ function handleLocationError(browserHasGeolocation, pos) {
 }
 
 function fetchHospitals() {
+    if (isLoading || !hasMoreData) return;
+    
+    isLoading = true;
+    showLoading();
+
     const bounds = map.getBounds();
     const center = bounds.getCenter();
     const ne = bounds.getNorthEast();
@@ -58,15 +76,20 @@ function fetchHospitals() {
     // Calculate radius in miles
     const radius = google.maps.geometry.spherical.computeDistanceBetween(center, ne) / 1609.34;
 
-    fetch(`${API_URL}/hospitals?lat=${center.lat()}&lon=${center.lng()}&radius=${radius}`)
+    fetch(`${API_URL}/hospitals?lat=${center.lat()}&lon=${center.lng()}&radius=${radius}&page=${currentPage}&per_page=50`)
         .then(response => response.json())
-        .then(hospitals => {
-            clearMarkers();
-            addMarkersToMap(hospitals);
+        .then(data => {
+            addMarkersToMap(data.hospitals);
+            currentPage++;
+            hasMoreData = currentPage <= data.total_pages;
+            isLoading = false;
+            hideLoading();
         })
         .catch(error => {
             console.error('Error fetching hospital data:', error);
             showError('Failed to fetch hospital data. Please try again later.');
+            isLoading = false;
+            hideLoading();
         });
 }
 
@@ -105,6 +128,14 @@ function addMarkersToMap(hospitals) {
             markers.push(marker);
         }
     });
+}
+
+function showLoading() {
+    document.getElementById('loading').style.display = 'block';
+}
+
+function hideLoading() {
+    document.getElementById('loading').style.display = 'none';
 }
 
 // Chat functionality
@@ -240,6 +271,13 @@ function showError(message) {
 function hideError() {
     document.getElementById('error').style.display = 'none';
 }
+
+google.maps.event.addListener(map, 'bounds_changed', function() {
+    if (map.getZoom() > 10 && !isLoading && hasMoreData) {
+        fetchHospitals();
+    }
+});
+
 
 // Initialize all features
 function initAll() {

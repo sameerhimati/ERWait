@@ -1,5 +1,6 @@
 import time
 import numpy as np
+import sys
 import cv2
 import base64
 import requests
@@ -13,13 +14,13 @@ from dotenv import load_dotenv
 import json
 import os
 from datetime import datetime, timezone
-from helpers.hospital_matching import match_hospitals
-from helpers.fetch_data import fetch_hospital_data
 from helpers.config import OPENAI_API_KEY, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
-from helpers.hospital_search import get_hospital_address_geocoding
-from cms_api_client import CMSAPIClient
-from data_processor import HospitalDataProcessor
-from helpers.hospital_matching import match_hospitals
+from hospital_data_service import hospital_data_service
+from rq import Queue
+from worker import conn
+from tasks import sync_cms_data_task
+import multiprocessing
+from background_tasks import run_task_in_background
 
 load_dotenv()  # Load environment variables from .env
 
@@ -102,8 +103,27 @@ def get_wait_times_from_image(api_key, base64_image, network_name, hospital_num,
         logger.error("Error from OpenAI API: %s", response.json())
         return ""
 
-def hospital_search(hospital_name, network_name):
-    return get_hospital_address_geocoding(hospital_name, network_name)
+def hospital_search(hospital_name, network_name=""):
+    # Replace with your actual Google Maps API key
+    api_key = "your_google_maps_api_key"
+    base_url = "https://maps.googleapis.com/maps/api/geocode/json"
+    
+    params = {
+        "address": network_name + " " + hospital_name,
+        "key": api_key
+    }
+    
+    response = requests.get(base_url, params=params)
+    data = response.json()
+    
+    if data["status"] == "OK":
+        address = data["results"][0]["formatted_address"]
+        return address
+    else:
+        return "Address not found"
+    
+import requests
+
 
 def parse_extracted_data(extracted_data, network_name):
     wait_times = []
@@ -136,6 +156,8 @@ def capture_full_page_screenshot(driver):
     total_height = driver.execute_script("return document.body.scrollHeight")
     viewport_height = driver.execute_script("return window.innerHeight")
     stitched_image = None
+
+    driver.set_window_size(1920, total_height)
 
     for y in range(0, total_height, viewport_height):
         driver.execute_script(f"window.scrollTo(0, {y});")
@@ -170,51 +192,6 @@ def update_last_run_time(cursor):
         ON CONFLICT (script_name) DO UPDATE SET last_run = EXCLUDED.last_run
     """, (current_time,))
 
-def sync_cms_data(cursor, last_run_time):
-    logger.info("Starting CMS data sync")
-    cms_client = CMSAPIClient()
-    processor = HospitalDataProcessor()
-
-    logger.info("Fetching all hospitals from CMS")
-    raw_hospitals = cms_client.get_all_hospitals()
-    logger.info(f"Fetched {len(raw_hospitals)} hospitals from CMS")
-
-    logger.info("Processing hospital data")
-    processed_hospitals = processor.process_hospitals(raw_hospitals, last_run_time)
-    logger.info(f"Processed {len(processed_hospitals)} hospitals")
-
-    if processed_hospitals:
-        logger.info("Updating database with processed hospital data")
-        execute_values(cursor, """
-            INSERT INTO hospitals (
-                facility_id, website_id, facility_name, address, city, state, zip_code, county,
-                phone_number, emergency_services, has_live_wait_time, latitude, longitude, last_updated
-            ) VALUES %s
-            ON CONFLICT (facility_id) DO UPDATE SET
-                website_id = EXCLUDED.website_id,
-                facility_name = EXCLUDED.facility_name,
-                address = EXCLUDED.address,
-                city = EXCLUDED.city,
-                state = EXCLUDED.state,
-                zip_code = EXCLUDED.zip_code,
-                county = EXCLUDED.county,
-                phone_number = EXCLUDED.phone_number,
-                emergency_services = EXCLUDED.emergency_services,
-                has_live_wait_time = EXCLUDED.has_live_wait_time,
-                latitude = EXCLUDED.latitude,
-                longitude = EXCLUDED.longitude,
-                last_updated = CURRENT_TIMESTAMP
-        """, [(
-            h['facility_id'], h.get('website_id'), h['facility_name'], h['address'],
-            h['city'], h['state'], h['zip_code'], h['county'], h['phone_number'],
-            h['emergency_services'], h['has_live_wait_time'], h['latitude'], h['longitude'],
-            datetime.now(timezone.utc)
-        ) for h in processed_hospitals])
-        logger.info(f"Updated {cursor.rowcount} hospitals in the database")
-    else:
-        logger.warning("No hospitals to process")
-
-    logger.info("CMS data sync completed")
 def update_wait_times(cursor, hospital_name, wait_time):
     try:
         cursor.execute("""
@@ -246,6 +223,7 @@ def populate_hospital_pages(cursor, hospital_pages_data):
                 hospital_num = EXCLUDED.hospital_num
         """, (name, url, num))
     logger.info(f"Populated {len(hospital_pages_data)} hospital pages")
+
 def verify_data_insertion(cursor):
     cursor.execute("SELECT COUNT(*) FROM hospitals")
     hospital_count = cursor.fetchone()[0]
@@ -257,6 +235,28 @@ def verify_data_insertion(cursor):
     hospital_pages_count = cursor.fetchone()[0]
     
     logger.info(f"Data verification: Hospitals: {hospital_count}, Wait Times: {wait_time_count}, Hospital Pages: {hospital_pages_count}")
+
+def run_sync_cms_data_task(last_run_time):
+    logger.info("Starting CMS data sync task")
+    try:
+        with get_db_cursor() as cursor:
+            hospitals = hospital_data_service.get_all_hospitals()
+            progress = hospital_data_service.load_progress()
+            start_index = progress['last_processed_index']
+
+            hospitals_to_process = hospitals[start_index:]
+            processed_hospitals = hospital_data_service.process_hospitals(hospitals_to_process, last_run_time)
+
+            if processed_hospitals:
+                hospital_data_service.bulk_upsert_hospitals(cursor, processed_hospitals)
+            
+            # Reset progress after successful completion
+            hospital_data_service.save_progress(0)
+        
+        logger.info("CMS data sync task completed successfully")
+    except Exception as e:
+        logger.error(f"Error in CMS data sync task: {str(e)}")
+        raise
 
 def main():
     logger.info("Starting main process")
@@ -277,17 +277,29 @@ def main():
                 ("Northern Nevada Spanish", "https://www.nnmc.com/services/emergency-medicine/er-at-spanish/", 1),
                 ("Metro Health", "https://www.metrohealth.org/emergency-room", 4)
             ]
-            populate_hospital_pages(cursor, hospital_pages_data)
+            try:
+                hospital_data_service.populate_hospital_pages(cursor, hospital_pages_data)
+            except AttributeError:
+                logger.warning("populate_hospital_pages method not found. Skipping population.")
+            except Exception as e:
+                logger.error(f"Error populating hospital pages: {e}")
 
             last_run_time = get_last_run_time(cursor)
             logger.info(f"Last successful run: {last_run_time}")
 
-            logger.info("Starting CMS data sync")
-            sync_cms_data(cursor, last_run_time)
-            logger.info("CMS data sync completed")
+            # Run CMS data sync task
+            logger.info("Starting CMS data sync task")
+            task = run_task_in_background(run_sync_cms_data_task, last_run_time)
+            
+            if sys.platform == 'darwin':
+                # If on macOS, wait for the thread to complete
+                task.join()
+            else:
+                # If using RQ, log the job ID
+                logger.info(f"Enqueued CMS data sync job with ID: {task.id}")
 
-            logger.info("Matching hospitals")
-            match_hospitals(cursor)
+            logger.info("Starting hospital matching process")
+            hospital_data_service.match_hospitals(cursor)
             logger.info("Hospital matching completed")
 
             # Initialize WebDriver
@@ -296,17 +308,17 @@ def main():
             chrome_options.add_argument("--headless")
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--window-size=1920,1080")  # Set a specific window size
             driver = webdriver.Chrome(options=chrome_options)
             logger.info("WebDriver initialized successfully")
 
             # Fetch hospital pages data
             logger.info("Fetching hospital pages data")
-            cursor.execute("SELECT hospital_name, url, hospital_num FROM hospital_pages")
-            rows = cursor.fetchall()
+            rows = hospital_data_service.fetch_hospital_network_data()
             logger.info(f"Fetched {len(rows)} hospital pages")
 
             for row in rows:
-                hospital_name, url, hospital_num = row
+                url, hospital_name, hospital_num = row  # Correct order of unpacking
                 logger.info(f"Processing network: {hospital_name}, URL: {url}")
                 try:
                     driver.get(url)
@@ -334,7 +346,7 @@ def main():
                     logger.info(f"Stored wait times for network: {hospital_name}")
 
                 except Exception as e:
-                    logger.error(f"Error processing URL {url}: {e}")
+                    logger.error(f"Error processing URL {url}: {str(e)}")
                     continue
 
             logger.info("Updating last run time")

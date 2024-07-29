@@ -5,6 +5,7 @@ import psycopg2.extras
 from helpers.config import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, GOOGLE_MAPS_API_KEY
 import os
 import logging
+from hospital_data_service import hospital_data_service
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -24,31 +25,15 @@ def get_db_connection():
 @app.route('/api/hospitals', methods=['GET'])
 def get_hospitals():
     try:
-        lat = float(request.args.get('lat'))
-        lon = float(request.args.get('lon'))
-        radius = float(request.args.get('radius', default=10))
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 50))
+        search_term = request.args.get('search', None)
+        
+        result = hospital_data_service.get_hospitals_paginated(page, per_page, search_term)
+        
+        return jsonify(result)
     except (TypeError, ValueError):
-        return jsonify({"error": "Invalid latitude, longitude, or radius"}), 400
-
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-    query = """
-    SELECT *
-    FROM hospitals
-    WHERE ST_DWithin(
-        ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography,
-        ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
-        %s * 1609.34  -- Convert miles to meters
-    )
-    """
-    cur.execute(query, (lon, lat, radius))
-    hospitals = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    return jsonify(list(hospitals))
+        return jsonify({"error": "Invalid parameters"}), 400
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
