@@ -4,18 +4,17 @@ import psycopg2
 import psycopg2.extras
 from helpers.config import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, GOOGLE_MAPS_API_KEY
 import os
-import logging
 from hospital_data_service import hospital_data_service
-
+from websocket_events import init_socketio
 # Set up logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
+from logger_setup import logger
 
 # Set up Flask app
 app = Flask(__name__, 
             static_folder=os.path.abspath('../frontend'),
             template_folder=os.path.abspath('../frontend'))
 CORS(app)
+socketio = init_socketio(app)
 
 def get_db_connection():
     return psycopg2.connect(
@@ -28,11 +27,21 @@ def get_hospitals():
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 50))
         search_term = request.args.get('search', None)
+        lat = float(request.args.get('lat', 0))
+        lon = float(request.args.get('lon', 0))
+        radius = float(request.args.get('radius', 0))
         
-        result = hospital_data_service.get_hospitals_paginated(page, per_page, search_term)
+        logger.debug(f"Fetching hospitals: page={page}, per_page={per_page}, search_term={search_term}, lat={lat}, lon={lon}, radius={radius}")
+        
+        result, debug_info = hospital_data_service.get_hospitals_paginated(page, per_page, search_term, lat, lon, radius)
+        
+        logger.debug(f"SQL Query: {debug_info['query']}")
+        logger.debug(f"SQL Parameters: {debug_info['params']}")
+        logger.debug(f"Fetched {len(result['hospitals'])} hospitals")
         
         return jsonify(result)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as e:
+        logger.error(f"Invalid parameters: {str(e)}")
         return jsonify({"error": "Invalid parameters"}), 400
 
 @app.route('/api/chat', methods=['POST'])
@@ -59,4 +68,4 @@ def serve_frontend(path):
         return render_template('index.html', google_maps_api_key=GOOGLE_MAPS_API_KEY)
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    socketio.run(app, debug=True, host='0.0.0.0', port=5000)

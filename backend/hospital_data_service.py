@@ -2,217 +2,280 @@ import csv
 import os
 import psycopg2
 from psycopg2.extras import execute_values
-from geopy.distance import great_circle
 from geopy.geocoders import Nominatim
-from itertools import islice
-from geopy.exc import GeocoderTimedOut, GeocoderQuotaExceeded
+from geopy.exc import GeocoderTimedOut, GeocoderQuotaExceeded, GeocoderServiceError
 from fuzzywuzzy import fuzz
 import time
 from datetime import datetime
-import redis
 import json
 from helpers.config import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 from logger_setup import logger
-from geopy.distance import great_circle
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from logger_setup import logger
-import uszipcode
+import multiprocessing
+from dateutil import parser
+
+def parse_date(date_string):
+    try:
+        return parser.parse(date_string).date()
+    except ValueError:
+        logger.warning(f"Invalid date format: {date_string}")
+        return None
+
+def process_hospital_chunk(chunk):
+    processed_hospitals = []
+    for hospital in chunk:
+        try:
+            processed_hospital = clean_hospital_data(hospital)
+            processed_hospitals.append(processed_hospital)
+        except Exception as e:
+            logger.error(f"Error processing hospital {hospital.get('Facility ID')}: {str(e)}")
+    return processed_hospitals
+
+def clean_hospital_data(hospital):
+    facility_id = hospital.get("Facility ID", "")
+    facility_name = hospital.get("Facility Name", "")
+    address = hospital.get("Address", "")
+    city = hospital.get("City", "")
+    state = hospital.get("State", "")
+    zip_code = hospital.get("ZIP Code", "")
+    
+    logger.info(f"Processing {facility_id}: {facility_name}")
+
+    last_updated = parse_date(hospital.get("Last Updated Date", ""))
+
+    return {
+        "facility_id": facility_id,
+        "facility_name": facility_name,
+        "address": address,
+        "city": city,
+        "state": state,
+        "zip_code": zip_code,
+        "county": hospital.get("County", ""),
+        "phone_number": hospital.get("Phone Number", ""),
+        "emergency_services": hospital.get("Emergency Services", False),
+        "er_volume": hospital.get("ER Volume", ""),
+        "wait_time": hospital.get("Wait Time", "360"),
+        "has_live_wait_time": False,
+        "latitude": hospital.get('latitude'),
+        "longitude": hospital.get('longitude'),
+        "last_updated": last_updated
+    }
 
 class HospitalDataService:
     def __init__(self):
         self.csv_path = os.path.join(os.path.dirname(__file__), 'data', 'Hospital_General_Information.csv')
-        self.geolocator = Nominatim(user_agent="hospital_matcher", timeout=10)
-        self.geocode_cache_file = 'geocode_cache.json'
-        self.progress_file = 'geocoding_progress.json'
+        self.geolocator = None
+        self.geocode_cache = {}
         self.load_geocode_cache()
-        self.search = uszipcode.SearchEngine()
 
-    def load_geocode_cache(self):
-        if os.path.exists(self.geocode_cache_file):
-            with open(self.geocode_cache_file, 'r') as f:
-                self.geocode_cache = json.load(f)
-        else:
-            self.geocode_cache = {}
-
-    def save_geocode_cache(self):
-        with open(self.geocode_cache_file, 'w') as f:
-            json.dump(self.geocode_cache, f)
-
-    def load_progress(self):
-        if os.path.exists(self.progress_file):
-            with open(self.progress_file, 'r') as f:
-                return json.load(f)
-        return {'last_processed_index': 0}
-
-    def save_progress(self, index):
-        with open(self.progress_file, 'w') as f:
-            json.dump({'last_processed_index': index}, f)
-
-    def geocode_address(self, hospital):
-        address_parts = [
-            hospital['address'].strip(),
-            hospital['city'].strip() if hospital['city'] and hospital['city'].lower() != 'none' else '',
-            hospital['state'].strip(),
-            hospital['zip_code'].strip()
-        ]
-        address = ', '.join(filter(None, address_parts))
-        cache_key = address.lower().replace(' ', '')
-        
-        if cache_key in self.geocode_cache:
-            return self.geocode_cache[cache_key]
-
-        logger.info(f"Geocoding address for {hospital['facility_name']}: {address}")
-        
-        result = self._geocode_with_retry(address)
-        
-        if result is None:
-            fallback_attempts = [
-                f"{hospital['facility_name']}, {hospital['state']}",
-                f"{hospital['facility_name']}, {hospital['city']}, {hospital['state']}",
-                hospital['zip_code']
-            ]
-            for attempt in fallback_attempts:
-                result = self._geocode_with_retry(attempt)
-                if result:
-                    logger.info(f"Fallback geocoding successful for {hospital['facility_name']} using {attempt}")
-                    break
-        
-        if result is None:
-            # Use zip code centroid as last resort
-            zip_info = self.search.by_zipcode(hospital['zip_code'])
-            if zip_info:
-                result = (zip_info.lat, zip_info.lng)
-                logger.info(f"Using zip code centroid for {hospital['facility_name']}")
-        
-        if result:
-            self.geocode_cache[cache_key] = result
-            self.save_geocode_cache()
-        
-        return result
-
-    def _geocode_with_retry(self, query):
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                time.sleep(2 ** attempt)  # Exponential backoff
-                location = self.geolocator.geocode(query)
-                if location:
-                    return (location.latitude, location.longitude)
-            except GeocoderTimedOut:
-                logger.warning(f"Geocoding attempt {attempt + 1} timed out for {query}")
-            except GeocoderQuotaExceeded:
-                logger.warning(f"Geocoding quota exceeded. Waiting before retry.")
-                time.sleep(60)  # Wait 60 seconds before retry
-            except Exception as e:
-                logger.error(f"Unexpected error during geocoding: {str(e)}")
-        
-        logger.error(f"Geocoding failed for {query} after {max_retries} attempts")
-        return None
-
-    def process_hospitals(self, hospitals, last_run_time):
-        logger.info(f"Processing {len(hospitals)} hospitals")
-        processed_hospitals = []
-        progress = self.load_progress()
-        start_index = progress['last_processed_index']
-        
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_hospital = {executor.submit(self.process_hospital, hospital): (i, hospital) 
-                                  for i, hospital in enumerate(hospitals[start_index:], start=start_index)}
-            for future in as_completed(future_to_hospital):
-                i, hospital = future_to_hospital[future]
-                try:
-                    processed_hospital = future.result()
-                    processed_hospitals.append(processed_hospital)
-                except Exception as exc:
-                    logger.error(f'{hospital["facility_name"]} generated an exception: {exc}')
-                
-                if len(processed_hospitals) % 50 == 0:
-                    logger.info(f"Processed {len(processed_hospitals)} out of {len(hospitals) - start_index} hospitals")
-                    self.save_progress(i)
-        
-        logger.info(f"Processed {len(processed_hospitals)} hospitals")
-        return processed_hospitals
-
-    def process_hospital(self, hospital):
-        processed_hospital = self.clean_hospital_data(hospital)
-        
-        coordinates = self.geocode_address(processed_hospital)
-        if coordinates:
-            processed_hospital['latitude'], processed_hospital['longitude'] = coordinates
-        else:
-            processed_hospital['latitude'], processed_hospital['longitude'] = None, None
-        
-        return processed_hospital
-    
-    def bulk_upsert_hospitals(self, cursor, hospitals):
-        insert_query = """
-        INSERT INTO hospitals (
-            facility_id, facility_name, address, city, state, zip_code, county,
-            phone_number, hospital_type, emergency_services, has_live_wait_time, latitude, longitude, last_updated
-        ) VALUES %s
-        ON CONFLICT (facility_id) DO UPDATE SET
-            facility_name = EXCLUDED.facility_name,
-            address = EXCLUDED.address,
-            city = EXCLUDED.city,
-            state = EXCLUDED.state,
-            zip_code = EXCLUDED.zip_code,
-            county = EXCLUDED.county,
-            phone_number = EXCLUDED.phone_number,
-            hospital_type = EXCLUDED.hospital_type,
-            emergency_services = EXCLUDED.emergency_services,
-            has_live_wait_time = EXCLUDED.has_live_wait_time,
-            latitude = EXCLUDED.latitude,
-            longitude = EXCLUDED.longitude,
-            last_updated = EXCLUDED.last_updated
-        """
-        hospital_data = [
-            (
-                h['facility_id'], h['facility_name'], h['address'], h['city'],
-                h['state'], h['zip_code'], h['county'], h['phone_number'],
-                h['hospital_type'], h['emergency_services'], h['has_live_wait_time'],
-                h['latitude'], h['longitude'], h['last_updated']
-            )
-            for h in hospitals
-        ]
-        execute_values(cursor, insert_query, hospital_data)
-        logger.info(f"Upserted {len(hospitals)} hospitals")
+    def init_geolocator(self):
+        self.geolocator = Nominatim(user_agent="hospital_matcher", timeout=10)
 
     def get_db_connection(self):
         return psycopg2.connect(
             dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
         )
-    
-    def get_hospitals_paginated(self, page=1, per_page=50, search_term=None):
-        offset = (page - 1) * per_page
-        query = """
-            SELECT id, facility_name, address, city, state, zip_code, latitude, longitude, has_live_wait_time
-            FROM hospitals
-            WHERE (%s IS NULL OR facility_name ILIKE %s OR address ILIKE %s)
-            ORDER BY facility_name
-            LIMIT %s OFFSET %s
-        """
-        count_query = """
-            SELECT COUNT(*) FROM hospitals
-            WHERE (%s IS NULL OR facility_name ILIKE %s OR address ILIKE %s)
-        """
-        search_pattern = f'%{search_term}%' if search_term else None
+
+    def load_geocode_cache(self):
+        try:
+            with open('geocode_cache.json', 'r') as f:
+                self.geocode_cache = json.load(f)
+        except FileNotFoundError:
+            self.geocode_cache = {}
+            logger.warning("geocode_cache.json not found. Proceeding without pre-loaded cache.")
+
+    def save_geocode_cache(self):
+        with open('geocode_cache.json', 'w') as f:
+            json.dump(self.geocode_cache, f)
+
+    def geocode_addresses(self, hospitals):
+        logger.info("Starting geocoding of addresses")
+        self.init_geolocator()
         
-        with self.get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(count_query, (search_term, search_pattern, search_pattern))
-                total_count = cursor.fetchone()[0]
+        for hospital in hospitals:
+            facility_name = hospital.get("Facility Name", "")
+            address = hospital.get("Address", "")
+            city = hospital.get("City", "")
+            state = hospital.get("State", "")
+            zip_code = hospital.get("ZIP Code", "")
+            
+            logger.info(f"Geocoding hospital: {facility_name}")
+
+            key = f"{facility_name}, {city}, {state}"
+            if key in self.geocode_cache:
+                hospital['latitude'], hospital['longitude'] = self.geocode_cache[key]
+                logger.info(f"Found cached coordinates for {key}: {self.geocode_cache[key]}")
+                continue
+
+            geocoding_attempts = [
+                f"{address}, {city}, {state} {zip_code}",
+                f"{facility_name}, {city}, {state}",
+                f"{facility_name}, {city}",
+                f"{facility_name}, {state}",
+                facility_name,
+                f"{city}, {state} {zip_code}"
+            ]
+
+            for attempt in geocoding_attempts:
+                try:
+                    logger.info(f"Attempting to geocode: {attempt}")
+                    location = self.geolocator.geocode(attempt)
+                    if location:
+                        result = (location.latitude, location.longitude)
+                        self.geocode_cache[key] = result
+                        hospital['latitude'], hospital['longitude'] = result
+                        logger.info(f"Geocoding successful for {attempt}: {result}")
+                        break
+                    time.sleep(1)
+                except (GeocoderTimedOut, GeocoderServiceError) as e:
+                    logger.warning(f"Geocoding error for {attempt}: {str(e)}")
+                    time.sleep(2)
+                except Exception as e:
+                    logger.error(f"Unexpected error geocoding {attempt}: {str(e)}")
+
+            if 'latitude' not in hospital or 'longitude' not in hospital:
+                logger.error(f"Failed to geocode hospital: {facility_name}")
+                hospital['latitude'], hospital['longitude'] = None, None
+
+        logger.info("Geocoding of addresses completed")
+
+    def get_all_hospitals(self):
+        logger.info(f"Reading CSV file: {self.csv_path}")
+        
+        hospitals = {}
+        total_rows = 0
+        er_count = 0
+        wait_time_count = 0
+        
+        try:
+            with open(self.csv_path, 'r', encoding='utf-8') as csvfile:
+                csv_reader = csv.DictReader(csvfile)
                 
-                cursor.execute(query, (search_term, search_pattern, search_pattern, per_page, offset))
-                hospitals = cursor.fetchall()
+                for row in csv_reader:
+                    total_rows += 1
+                    facility_id = row.get('Facility ID', '')
+                    measure_id = row.get('Measure ID', '')
+                    
+                    if measure_id == 'EDV':
+                        er_count += 1
+                        if facility_id not in hospitals:
+                            hospitals[facility_id] = {
+                                'Facility ID': facility_id,
+                                'Facility Name': row.get('Facility Name', ''),
+                                'Address': row.get('Address', ''),
+                                'City': row.get('City/Town', ''),
+                                'State': row.get('State', ''),
+                                'ZIP Code': row.get('ZIP Code', ''),
+                                'County': row.get('County/Parish', ''),
+                                'Phone Number': row.get('Telephone Number', ''),
+                                'Emergency Services': True,
+                                'ER Volume': row.get('Score', ''),
+                                'Wait Time': '360',
+                                'Last Updated Date': row.get('End Date', '')
+                            }
+                    elif measure_id == 'ED_2_Strata_1':
+                        if facility_id in hospitals:
+                            wait_time_count += 1
+                            hospitals[facility_id]['Wait Time'] = row.get('Score', '360')
+
+            logger.info(f"Total rows in CSV: {total_rows}")
+            logger.info(f"Total Emergency Rooms found: {er_count}")
+            logger.info(f"Total Wait Times found: {wait_time_count}")
+            logger.info(f"Successfully processed {len(hospitals)} unique Emergency Room hospitals")
+            return list(hospitals.values())
         
-        return {
-            'hospitals': hospitals,
-            'total_count': total_count,
-            'page': page,
-            'per_page': per_page,
-            'total_pages': (total_count + per_page - 1) // per_page
-        }
+        except Exception as e:
+            logger.error(f"Unexpected error when reading CSV: {str(e)}")
+            raise
+
+    def sync_cms_data(self, cursor, last_run_time):
+        logger.info("Starting CMS data sync")
+        
+        try:
+            raw_hospitals = self.get_all_hospitals()
+            logger.info(f"Fetched {len(raw_hospitals)} hospitals from CMS")
+
+            cursor.execute("SELECT facility_id, latitude, longitude FROM hospitals")
+            existing_hospitals = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+
+            hospitals_to_process = [
+                hospital for hospital in raw_hospitals
+                if hospital.get("Facility ID") not in existing_hospitals or 
+                self.is_hospital_new_or_updated(hospital, last_run_time)
+            ]
+
+            logger.info(f"Found {len(hospitals_to_process)} hospitals to process")
+
+            # Geocode addresses before multiprocessing
+            self.geocode_addresses(hospitals_to_process)
+
+            # Use multiprocessing Pool for data cleaning
+            with multiprocessing.Pool() as pool:
+                chunk_size = 100
+                hospital_chunks = [hospitals_to_process[i:i+chunk_size] for i in range(0, len(hospitals_to_process), chunk_size)]
+                
+                logger.info(f"Splitting {len(hospitals_to_process)} hospitals into {len(hospital_chunks)} chunks")
+                for chunk_result in pool.imap_unordered(process_hospital_chunk, hospital_chunks):
+                    logger.info(f"Processed chunk of {len(chunk_result)} hospitals")
+                    logger.info("Pool Number: {}".format(multiprocessing.current_process().name))
+                    if chunk_result:
+                        logger.info(f"Updating database with chunk of {len(chunk_result)} hospitals")
+                        self.bulk_upsert_hospitals(cursor, chunk_result)
+
+            self.save_geocode_cache()
+
+            logger.info("CMS data sync completed")
+        
+        except Exception as e:
+            logger.error(f"Error in CMS data sync: {str(e)}")
+            raise
+
+    def is_hospital_new_or_updated(self, hospital, last_run_time):
+        last_updated_str = hospital.get('Last Updated Date', '').strip()
+        if not last_updated_str:
+            return True
+        try:
+            hospital_update_date = parse_date(last_updated_str)
+            return hospital_update_date > last_run_time.date()
+        except ValueError:
+            logger.warning(f"Invalid date format for hospital {hospital.get('Facility Name', 'Unknown')}: {last_updated_str}")
+            return True
+
+    def update_wait_times(self, cursor, hospital_identifier, wait_time, is_live=False):
+        try:
+            if isinstance(hospital_identifier, int):
+                cursor.execute("""
+                    UPDATE hospitals
+                    SET wait_time = %s, 
+                        has_wait_time_data = TRUE, 
+                        has_live_wait_time = CASE WHEN %s THEN TRUE ELSE has_live_wait_time END,
+                        last_updated = NOW()
+                    WHERE id = %s
+                """, (wait_time, is_live, hospital_identifier))
+            else:
+                cursor.execute("""
+                    UPDATE hospitals h
+                    SET wait_time = %s, 
+                        has_wait_time_data = TRUE, 
+                        has_live_wait_time = CASE WHEN %s THEN TRUE ELSE has_live_wait_time END,
+                        last_updated = NOW()
+                    FROM hospital_page_links hpl
+                    JOIN hospital_pages hp ON hpl.hospital_page_id = hp.id
+                    WHERE h.id = hpl.hospital_id AND hp.hospital_name = %s
+                """, (wait_time, is_live, hospital_identifier))
+
+            if cursor.rowcount > 0:
+                logger.info(f"Updated wait time for {hospital_identifier}")
+                return True
+            else:
+                logger.warning(f"No matching hospital found for {hospital_identifier}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error updating wait time for {hospital_identifier}: {e}")
+            raise
+
     
+
     def populate_hospital_pages(self, cursor, hospital_pages_data):
         for name, url, num in hospital_pages_data:
             cursor.execute("""
@@ -224,179 +287,137 @@ class HospitalDataService:
             """, (name, url, num))
         logger.info(f"Populated {len(hospital_pages_data)} hospital pages")
 
-    def get_all_hospitals(self):
-        logger.info(f"Reading CSV file: {self.csv_path}")
+    
+    def bulk_upsert_hospitals(self, cursor, hospitals):
+        if not hospitals:
+            logger.warning("No hospitals to upsert")
+            return
+
+        insert_query = """
+        INSERT INTO hospitals (
+            facility_id, facility_name, address, city, state, zip_code, county,
+            phone_number, emergency_services, er_volume, wait_time, has_wait_time_data, has_live_wait_time, 
+            latitude, longitude, last_updated
+        ) VALUES %s
+        ON CONFLICT (facility_id) DO UPDATE SET
+            facility_name = EXCLUDED.facility_name,
+            address = EXCLUDED.address,
+            city = EXCLUDED.city,
+            state = EXCLUDED.state,
+            zip_code = EXCLUDED.zip_code,
+            county = EXCLUDED.county,
+            phone_number = EXCLUDED.phone_number,
+            emergency_services = EXCLUDED.emergency_services,
+            er_volume = EXCLUDED.er_volume,
+            wait_time = EXCLUDED.wait_time,
+            has_wait_time_data = CASE
+                WHEN EXCLUDED.wait_time IS NOT NULL AND EXCLUDED.wait_time != 'N/A' THEN TRUE
+                ELSE hospitals.has_wait_time_data
+            END,
+            has_live_wait_time = hospitals.has_live_wait_time,
+            latitude = COALESCE(EXCLUDED.latitude, hospitals.latitude),
+            longitude = COALESCE(EXCLUDED.longitude, hospitals.longitude),
+            last_updated = EXCLUDED.last_updated
+        """
         
-        hospitals = {}
+        hospital_data = [
+            (
+                h['facility_id'], h['facility_name'], h['address'], h['city'],
+                h['state'], h['zip_code'], h['county'], h['phone_number'],
+                h['emergency_services'], h['er_volume'], h['wait_time'], 
+                h['wait_time'] is not None and h['wait_time'] != 'N/A',  # has_wait_time_data
+                False,  # has_live_wait_time (CMS data is not live)
+                h['latitude'], h['longitude'], h['last_updated']
+            )
+            for h in hospitals
+        ]
+
         try:
-            with open(self.csv_path, 'r', encoding='utf-8') as csvfile:
-                csv_reader = csv.DictReader(csvfile)
-                
-                # Print column names for debugging
-                logger.debug(f"CSV columns: {csv_reader.fieldnames}")
-                
-                for row in csv_reader:
-                    facility_id = row.get('Facility ID')
-                    if not facility_id:
-                        logger.warning("Row missing Facility ID, skipping")
-                        continue
-                    
-                    if facility_id not in hospitals:
-                        hospitals[facility_id] = {
-                            'Facility ID': facility_id,
-                            'Facility Name': row.get('Facility Name', ''),
-                            'Address': row.get('Address', ''),
-                            'City': row.get('City/Town', ''),  # Note the change here
-                            'State': row.get('State', ''),
-                            'ZIP Code': row.get('ZIP Code', ''),
-                            'County Name': row.get('County Name', ''),  # This might be the problematic field
-                            'Phone Number': row.get('Phone Number', ''),
-                            'Hospital Type': row.get('Hospital Type', ''),
-                            'Emergency Services': row.get('Emergency Services', 'No') == 'Yes',
-                            'Last Updated Date': row.get('Last Updated Date', '')
-                        }
-                    
-                    # Check for emergency services in a separate column if it exists
-                    if 'Emergency Services' in row:
-                        hospitals[facility_id]['Emergency Services'] = row['Emergency Services'] == 'Yes'
-
-            logger.info(f"Successfully processed {len(hospitals)} unique hospitals")
-            return list(hospitals.values())
-        
-        except KeyError as e:
-            logger.error(f"KeyError when reading CSV: {str(e)}. This column is missing from the CSV.")
-            raise
+            execute_values(cursor, insert_query, hospital_data)
+            logger.info(f"Upserted {len(hospital_data)} hospitals")
         except Exception as e:
-            logger.error(f"Unexpected error when reading CSV: {str(e)}")
-            raise
+            logger.error(f"Error during bulk upsert: {str(e)}")
+            for h in hospital_data:
+                try:
+                    cursor.execute(insert_query, (h,))
+                    logger.info(f"Inserted hospital {h[0]} individually")
+                except Exception as individual_error:
+                    logger.error(f"Error inserting hospital {h[0]}: {str(individual_error)}")
+            cursor.connection.commit()
 
-
-    def get_hospital_from_db(self, facility_id):
-        with self.get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT * FROM hospitals WHERE facility_id = %s
-                """, (facility_id,))
-                result = cursor.fetchone()
-                if result:
-                    return dict(zip([column[0] for column in cursor.description], result))
-        return None
-
-    def clean_hospital_data(self, hospital):
-        return {
-            "facility_id": hospital.get("Facility ID", ""),
-            "facility_name": hospital.get("Facility Name", ""),
-            "address": hospital.get("Address", ""),
-            "city": hospital.get("City/Town", ""),
-            "state": hospital.get("State", ""),
-            "zip_code": hospital.get("ZIP Code", ""),
-            "county": hospital.get("County Name", ""),
-            "phone_number": hospital.get("Phone Number", ""),
-            "hospital_type": hospital.get("Hospital Type", ""),
-            "emergency_services": hospital.get("Emergency Services", "No") == "Yes",
-            "has_live_wait_time": False,
-            "latitude": None,
-            "longitude": None,
-            "last_updated": hospital.get("Last Updated Date", "")
-        }
-
-    def match_hospitals(self, cursor):
-        cursor.execute("""
-            CREATE EXTENSION IF NOT EXISTS pg_trgm;
-            CREATE INDEX IF NOT EXISTS idx_hospital_name_trgm ON hospitals USING gin (facility_name gin_trgm_ops);
-            CREATE INDEX IF NOT EXISTS idx_hospital_pages_name_trgm ON hospital_pages USING gin (hospital_name gin_trgm_ops);
-        """)
-
-        cursor.execute("""
-            SELECT hp.id, hp.hospital_name, h.id, h.facility_name, h.latitude, h.longitude,
-                   similarity(hp.hospital_name, h.facility_name) as name_similarity
-            FROM hospital_pages hp
-            CROSS JOIN LATERAL (
-                SELECT id, facility_name, latitude, longitude
-                FROM hospitals
-                ORDER BY hp.hospital_name <-> facility_name
-                LIMIT 5
-            ) h
-            WHERE similarity(hp.hospital_name, h.facility_name) > 0.3
-            ORDER BY hp.id, name_similarity DESC
-        """)
-        potential_matches = cursor.fetchall()
-
-        for match in potential_matches:
-            hp_id, hp_name, h_id, h_name, h_lat, h_lon, name_similarity = match
+    def match_hospitals_from_screenshot(self, extracted_hospitals, database_hospitals, network_name):
+        start_time = time.time()
+        matched_pairs = []
+        matched_db_hospitals = set()
+        logger.info(f"Starting matching process for {len(extracted_hospitals)} extracted hospitals against {len(database_hospitals)} database hospitals")
+        
+        for i, extracted_hospital in enumerate(extracted_hospitals):
+            best_match = None
+            best_score = 0
+            logger.info(f"Processing extracted hospital {i+1}/{len(extracted_hospitals)}: {extracted_hospital['hospital_name']}")
             
-            distance = float('inf')
-            if h_lat and h_lon:
-                wt_location = self.get_hospital_location(hp_name)
-                if wt_location:
-                    distance = great_circle((wt_location[0], wt_location[1]), (h_lat, h_lon)).miles
-
-            score = name_similarity * 0.7 + (100 - min(distance, 100)) * 0.3
-
-            if score > 85:
-                logger.info(f"Matched {hp_name} to {h_name} with score {score}")
-                cursor.execute("""
-                    INSERT INTO hospital_page_links (hospital_id, hospital_page_id)
-                    VALUES (%s, %s)
-                    ON CONFLICT DO NOTHING
-                """, (h_id, hp_id))
-            else:
-                logger.warning(f"No suitable match found for {hp_name}")
-
-    def get_hospital_location(self, hospital_name):
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                location = self.geolocator.geocode(f"{hospital_name} hospital")
-                if location:
-                    return (location.latitude, location.longitude)
-            except Exception:
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                    continue
+            # Prepare the extracted name for matching
+            extracted_name = extracted_hospital['hospital_name'].lower()
+            extracted_name_without_network = extracted_name.replace(network_name.lower(), '').strip()
+            
+            for j, db_hospital in enumerate(database_hospitals):
+                if db_hospital['id'] in matched_db_hospitals:
+                    continue  # Skip already matched hospitals
+                
+                db_name = db_hospital['facility_name'].lower()
+                
+                # Tier 1: Exact match (case-insensitive)
+                if extracted_name == db_name:
+                    best_match = db_hospital
+                    best_score = 100
+                    break
+                
+                # Tier 2: Network name + hospital name match
+                if network_name.lower() in db_name and extracted_name_without_network in db_name:
+                    score = 95
+                    if score > best_score:
+                        best_match = db_hospital
+                        best_score = score
+                        continue
+                
+                # Tier 3: Fuzzy matching
+                name_score = fuzz.token_set_ratio(extracted_name, db_name)
+                address_score = fuzz.token_set_ratio(extracted_hospital['address'], db_hospital['address'])
+                city_state_score = fuzz.token_set_ratio(
+                    f"{db_hospital['city']} {db_hospital['state']}",
+                    f"{extracted_hospital['hospital_name']} {extracted_hospital['address']}"
+                )
+                
+                # Weighted scoring
+                total_score = (name_score * 0.5) + (city_state_score * 0.3) + (address_score * 0.2)
+                
+                # Bonus for network name presence
+                if network_name.lower() in db_name:
+                    total_score += 10
+                
+                if total_score > best_score:
+                    best_score = total_score
+                    best_match = db_hospital
+            
+            # Determine if the match is good enough
+            if best_match:
+                if best_score >= 90:
+                    matched_pairs.append({
+                        'extracted': extracted_hospital,
+                        'matched': best_match,
+                        'score': best_score
+                    })
+                    matched_db_hospitals.add(best_match['id'])
+                    logger.info(f"Matched {extracted_hospital['hospital_name']} to {best_match['facility_name']} with score {best_score}")
                 else:
-                    logger.warning(f"Failed to geocode {hospital_name} after {max_retries} attempts")
-        return None
-
-    def sync_cms_data(self, cursor, last_run_time):
-        logger.info("Starting CMS data sync")
-        
-        try:
-            raw_hospitals = self.get_all_hospitals()
-            logger.info(f"Fetched {len(raw_hospitals)} hospitals from CMS")
-
-            # Check if this is the initial run
-            cursor.execute("SELECT COUNT(*) FROM hospitals")
-            is_initial_run = cursor.fetchone()[0] == 0
-
-            if is_initial_run:
-                logger.info("Initial run detected. Processing all hospitals.")
-                hospitals_to_process = raw_hospitals
+                    logger.warning(f"Low confidence match for {extracted_hospital['hospital_name']} to {best_match['facility_name']} with score {best_score}")
             else:
-                hospitals_to_process = [
-                    hospital for hospital in raw_hospitals
-                    if self.is_hospital_new_or_updated(hospital, last_run_time)
-                ]
-                logger.info(f"Found {len(hospitals_to_process)} new or updated hospitals")
-
-            processed_hospitals = self.process_hospitals(hospitals_to_process, last_run_time)
-
-            if processed_hospitals:
-                logger.info("Updating database with processed hospital data")
-                self.bulk_upsert_hospitals(cursor, processed_hospitals)
-            else:
-                logger.info("No hospitals to process")
-
-            logger.info("CMS data sync completed")
+                logger.warning(f"No match found for {extracted_hospital['hospital_name']}")
         
-        except Exception as e:
-            logger.error(f"Error in CMS data sync: {str(e)}")
-            raise
-
-    def is_hospital_new_or_updated(self, hospital, last_run_time):
-        hospital_update_date = datetime.strptime(hospital['Last Updated Date'], '%Y-%m-%d').date()
-        return hospital_update_date > last_run_time.date()
-
+        end_time = time.time()
+        logger.info(f"Matching process completed in {end_time - start_time:.2f} seconds")
+        return matched_pairs
+    
     def fetch_hospital_network_data(self):
         try:
             with self.get_db_connection() as conn:
@@ -408,5 +429,78 @@ class HospitalDataService:
         except Exception as e:
             logger.error("Error fetching hospital network data: %s", e)
             raise
+
+    def get_all_database_hospitals(self, cursor):
+        start_time = time.time()
+        cursor.execute("""
+            SELECT id, facility_id, facility_name, address, city, state, zip_code, latitude, longitude
+            FROM hospitals
+        """)
+        results = [dict(zip([column[0] for column in cursor.description], row)) for row in cursor.fetchall()]
+        end_time = time.time()
+        logger.info(f"Retrieved {len(results)} hospitals from database in {end_time - start_time:.2f} seconds")
+        return results
+    
+    def get_hospitals_paginated(self, page=1, per_page=50, search_term=None, lat=0, lon=0, radius=0):
+        offset = (page - 1) * per_page
+        query = """
+            SELECT id, facility_name, address, city, state, zip_code, latitude, longitude, has_live_wait_time
+            FROM hospitals
+            WHERE (%s IS NULL OR facility_name ILIKE %s OR address ILIKE %s)
+            AND (
+                %s = 0 OR %s = 0 OR %s = 0 OR
+                (
+                    6371 * acos(
+                        cos(radians(%s)) * cos(radians(latitude)) *
+                        cos(radians(longitude) - radians(%s)) +
+                        sin(radians(%s)) * sin(radians(latitude))
+                    )
+                ) <= %s
+            )
+            ORDER BY facility_name
+            LIMIT %s OFFSET %s
+        """
+        count_query = """
+            SELECT COUNT(*) FROM hospitals
+            WHERE (%s IS NULL OR facility_name ILIKE %s OR address ILIKE %s)
+            AND (
+                %s = 0 OR %s = 0 OR %s = 0 OR
+                (
+                    6371 * acos(
+                        cos(radians(%s)) * cos(radians(latitude)) *
+                        cos(radians(longitude) - radians(%s)) +
+                        sin(radians(%s)) * sin(radians(latitude))
+                    )
+                ) <= %s
+            )
+        """
+        search_pattern = f'%{search_term}%' if search_term else None
+        
+        params = (search_term, search_pattern, search_pattern, lat, lon, radius, lat, lon, lat, radius)
+        count_params = params
+        query_params = params + (per_page, offset)
+        
+        with self.get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(count_query, count_params)
+                total_count = cursor.fetchone()[0]
+                
+                cursor.execute(query, query_params)
+                hospitals = cursor.fetchall()
+        
+        result = {
+            'hospitals': [dict(zip(['id', 'facility_name', 'address', 'city', 'state', 'zip_code', 'latitude', 'longitude', 'has_live_wait_time'], hospital)) for hospital in hospitals],
+            'total_count': total_count,
+            'page': page,
+            'per_page': per_page,
+            'total_pages': (total_count + per_page - 1) // per_page
+        }
+        
+        debug_info = {
+            'query': query,
+            'params': query_params
+        }
+        
+        return result, debug_info
 
 hospital_data_service = HospitalDataService()

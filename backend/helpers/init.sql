@@ -25,8 +25,11 @@ CREATE TABLE hospitals (
     has_wait_time_data BOOLEAN DEFAULT FALSE,
     latitude FLOAT,
     longitude FLOAT,
+    er_volume VARCHAR(50),
+    wait_time INTEGER,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
 
 -- Create wait_times table
 CREATE TABLE wait_times (

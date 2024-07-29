@@ -8,6 +8,7 @@ let currentInfoWindow = null;
 let currentPage = 1;
 let isLoading = false;
 let hasMoreData = true;
+let socket;
 
 function initializeMap() {
     console.log("Initializing map");
@@ -26,6 +27,12 @@ function initializeMap() {
 
     google.maps.event.addListener(map, 'idle', fetchHospitals);
     google.maps.event.addListener(map, 'zoom_changed', resetPagination);
+    google.maps.event.addListener(map, 'bounds_changed', function() {
+        if (map.getZoom() > 10 && !isLoading && hasMoreData) {
+            fetchHospitals();
+        }
+    });
+    
 }
 
 function resetPagination() {
@@ -43,11 +50,20 @@ function getUserLocation() {
             };
             map.setCenter(userLocation);
             map.setZoom(10);
-            if (userMarker) userMarker.setMap(null);
-            userMarker = new google.maps.Marker({
+            
+            // Add a blue dot for user's location
+            new google.maps.Marker({
                 position: userLocation,
                 map: map,
-                title: "You are here"
+                icon: {
+                    path: google.maps.SymbolPath.CIRCLE,
+                    scale: 10,
+                    fillColor: "#4285F4",
+                    fillOpacity: 1,
+                    strokeColor: "#ffffff",
+                    strokeWeight: 2
+                },
+                title: "Your Location"
             });
         }, function() {
             handleLocationError(true, map.getCenter());
@@ -63,6 +79,64 @@ function handleLocationError(browserHasGeolocation, pos) {
         'Error: Your browser doesn\'t support geolocation.');
 }
 
+function initializeWebSocket() {
+    socket = io(window.location.origin);
+
+    socket.on('connect', () => {
+        console.log('Connected to WebSocket');
+        requestInitialData();
+    });
+
+    socket.on('disconnect', () => {
+        console.log('Disconnected from WebSocket');
+    });
+
+    socket.on('initial_data', (data) => {
+        console.log('Received initial data:', data);
+        addMarkersToMap(data.hospitals);
+    });
+
+    socket.on('wait_time_update', (data) => {
+        console.log('Received wait time update:', data);
+        updateMarkerWaitTime(data.hospital_id, data.new_wait_time);
+    });
+}
+
+function requestInitialData() {
+    const center = map.getCenter();
+    const bounds = map.getBounds();
+    const ne = bounds.getNorthEast();
+    const radius = google.maps.geometry.spherical.computeDistanceBetween(center, ne) / 1609.34; // Convert to miles
+
+    socket.emit('request_initial_data', {
+        lat: center.lat(),
+        lon: center.lng(),
+        radius: radius
+    });
+}
+
+function updateMarkerWaitTime(hospitalId, newWaitTime, isLive) {
+    const marker = markers.find(m => m.hospitalId === hospitalId);
+    if (marker) {
+        marker.setIcon(getMarkerIcon(newWaitTime, isLive));
+        marker.setLabel({
+            text: newWaitTime !== 'N/A' ? `${newWaitTime}` : 'N/A',
+            color: 'black',
+            fontSize: '12px',
+            fontWeight: 'bold'
+        });
+        
+        if (currentInfoWindow && currentInfoWindow.anchor === marker) {
+            const content = currentInfoWindow.getContent();
+            const updatedContent = content.replace(
+                /(?:Current|Average) wait time: .*<br>/,
+                `${isLive ? 'Current' : 'Average'} wait time: ${newWaitTime !== 'N/A' ? `${newWaitTime} minutes` : 'Not available'}<br>`
+            );
+            currentInfoWindow.setContent(updatedContent);
+        }
+    }
+}
+
 function fetchHospitals() {
     if (isLoading || !hasMoreData) return;
     
@@ -76,9 +150,17 @@ function fetchHospitals() {
     // Calculate radius in miles
     const radius = google.maps.geometry.spherical.computeDistanceBetween(center, ne) / 1609.34;
 
-    fetch(`${API_URL}/hospitals?lat=${center.lat()}&lon=${center.lng()}&radius=${radius}&page=${currentPage}&per_page=50`)
+    const url = `${API_URL}/hospitals?lat=${center.lat()}&lon=${center.lng()}&radius=${radius}&page=${currentPage}&per_page=50`;
+    console.log('Fetching hospitals from:', url);
+
+    fetch(url)
         .then(response => response.json())
         .then(data => {
+            console.log('Received hospital data:', data);
+            console.log('Number of hospitals:', data.hospitals.length);
+            console.log('Total count:', data.total_count);
+            console.log('Current page:', data.page);
+            console.log('Total pages:', data.total_pages);
             addMarkersToMap(data.hospitals);
             currentPage++;
             hasMoreData = currentPage <= data.total_pages;
@@ -93,27 +175,75 @@ function fetchHospitals() {
         });
 }
 
+function getMarkerIcon(waitTime, isLive) {
+    const size = new google.maps.Size(30, 30);
+    const anchor = new google.maps.Point(15, 30);
+    let url;
+
+    if (waitTime === null || waitTime === undefined || waitTime === 'N/A') {
+        url = 'https://maps.google.com/mapfiles/ms/icons/gray-dot.png';
+    } else {
+        waitTime = parseInt(waitTime);
+        if (isLive) {
+            if (waitTime <= 15) {
+                url = 'https://maps.google.com/mapfiles/ms/icons/green-dot.png';
+            } else if (waitTime <= 30) {
+                url = 'https://maps.google.com/mapfiles/ms/icons/yellow-dot.png';
+            } else if (waitTime <= 60) {
+                url = 'https://maps.google.com/mapfiles/ms/icons/orange-dot.png';
+            } else {
+                url = 'https://maps.google.com/mapfiles/ms/icons/red-dot.png';
+            }
+        } else {
+            url = 'https://maps.google.com/mapfiles/ms/icons/blue-dot.png'; // Historical data
+        }
+    }
+
+    return {
+        url: url,
+        size: size,
+        anchor: anchor,
+        scaledSize: size
+    };
+}
+
+
 function clearMarkers() {
     markers.forEach(marker => marker.setMap(null));
     markers = [];
 }
 
 function addMarkersToMap(hospitals) {
+    console.log('Adding markers for hospitals:', hospitals);
     hospitals.forEach(hospital => {
-        if (hospital.latitude && hospital.longitude) {
+        const lat = parseFloat(hospital.latitude);
+        const lng = parseFloat(hospital.longitude);
+        
+        if (!isNaN(lat) && !isNaN(lng)) {
+            const waitTime = hospital.wait_time !== undefined ? hospital.wait_time : 'N/A';
+            const isLive = hospital.has_live_wait_time;
             const marker = new google.maps.Marker({
-                position: { lat: hospital.latitude, lng: hospital.longitude },
+                position: { lat, lng },
                 map: map,
-                title: hospital.facility_name
+                title: hospital.facility_name,
+                hospitalId: hospital.id,
+                icon: getMarkerIcon(waitTime, isLive),
+                label: {
+                    text: waitTime !== 'N/A' ? `${waitTime}` : 'N/A',
+                    color: 'black',
+                    fontSize: '12px',
+                    fontWeight: 'bold'
+                }
             });
 
             const infoWindow = new google.maps.InfoWindow({
                 content: `
                     <b>${hospital.facility_name}</b><br>
                     Address: ${hospital.address}, ${hospital.city}, ${hospital.state} ${hospital.zip_code}<br>
-                    ${hospital.wait_time ? `Wait time: ${hospital.wait_time} minutes<br>` : ''}
+                    ${isLive ? `Current wait time: ${waitTime} minutes` : 
+                               waitTime !== 'N/A' ? `Average wait time: ${waitTime} minutes` : 'Wait time: Not available'}<br>
                     ${hospital.phone_number ? `Phone: ${hospital.phone_number}<br>` : ''}
-                    ${hospital.has_live_wait_time ? '<p>Live wait times available</p>' : ''}
+                    ${isLive ? '<p>Live wait times available</p>' : ''}
                 `
             });
 
@@ -126,6 +256,8 @@ function addMarkersToMap(hospitals) {
             });
 
             markers.push(marker);
+        } else {
+            console.warn('Invalid coordinates for hospital:', hospital);
         }
     });
 }
@@ -272,24 +404,18 @@ function hideError() {
     document.getElementById('error').style.display = 'none';
 }
 
-google.maps.event.addListener(map, 'bounds_changed', function() {
-    if (map.getZoom() > 10 && !isLoading && hasMoreData) {
-        fetchHospitals();
-    }
-});
-
-
 // Initialize all features
 function initAll() {
-    initNavigation();
-    initChat();
-    initPriceComparison();
     if (typeof google !== 'undefined') {
         initializeMap();
     } else {
         window.initializeMap = initializeMap;
     }
-    switchPage('map'); // Set map as the default page
+    switchPage('map');
+    initNavigation();
+    initChat();
+    initPriceComparison();
+    initializeWebSocket();
 }
 
 // Call initAll when the DOM is fully loaded

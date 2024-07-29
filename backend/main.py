@@ -16,11 +16,13 @@ import os
 from datetime import datetime, timezone
 from helpers.config import OPENAI_API_KEY, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 from hospital_data_service import hospital_data_service
-from rq import Queue
-from worker import conn
 from tasks import sync_cms_data_task
-import multiprocessing
 from background_tasks import run_task_in_background
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.NotOpenSSLWarning)
+from websocket_events import broadcast_wait_time_update
+from hospital_data_service import hospital_data_service
+from websocket_events import broadcast_wait_time_update
 
 load_dotenv()  # Load environment variables from .env
 
@@ -126,8 +128,7 @@ import requests
 
 
 def parse_extracted_data(extracted_data, network_name):
-    wait_times = []
-
+    extracted_hospitals = []
     try:
         # Remove any leading/trailing triple backticks
         if extracted_data.startswith("```json"):
@@ -146,32 +147,45 @@ def parse_extracted_data(extracted_data, network_name):
                     hospital_address = new_address
                 # If hospital_search also fails, keep the original address
             wait_time = hospital.get("wait_time", "").strip()
-            wait_times.append((hospital_name, hospital_address, wait_time))
+            
+            extracted_hospitals.append({
+                "hospital_name": hospital_name,
+                "address": hospital_address,
+                "wait_time": wait_time,
+                "network_name": network_name
+            })
     except json.JSONDecodeError as e:
         logger.error("Error parsing JSON: %s", e)
 
-    return wait_times
+    return extracted_hospitals
 
 def capture_full_page_screenshot(driver):
     total_height = driver.execute_script("return document.body.scrollHeight")
     viewport_height = driver.execute_script("return window.innerHeight")
+    #driver.set_window_size(1280, viewport_height)
+    
     stitched_image = None
-
-    driver.set_window_size(1920, total_height)
-
     for y in range(0, total_height, viewport_height):
         driver.execute_script(f"window.scrollTo(0, {y});")
         time.sleep(1)
         screenshot = driver.get_screenshot_as_png()
         np_image = np.frombuffer(screenshot, np.uint8)
         img = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
-
+        
         if stitched_image is None:
             stitched_image = img
         else:
             stitched_image = np.vstack((stitched_image, img))
+    
+    # Resize the image to reduce its size
+    scale_percent = 50  # percent of original size
+    width = int(stitched_image.shape[1] * scale_percent / 100)
+    height = int(stitched_image.shape[0] * scale_percent / 100)
+    dim = (width, height)
+    resized = cv2.resize(stitched_image, dim, interpolation = cv2.INTER_AREA)
+    
+    return resized
 
-    return stitched_image
 
 def get_last_run_time(cursor):
     cursor.execute("SELECT last_run FROM script_metadata WHERE script_name = 'main_script'")
@@ -192,37 +206,24 @@ def update_last_run_time(cursor):
         ON CONFLICT (script_name) DO UPDATE SET last_run = EXCLUDED.last_run
     """, (current_time,))
 
-def update_wait_times(cursor, hospital_name, wait_time):
+def update_wait_times(cursor, hospital_identifier, wait_time):
     try:
-        cursor.execute("""
-            WITH hospital_ids AS (
-                SELECT h.id
-                FROM hospitals h
-                JOIN hospital_page_links hpl ON h.id = hpl.hospital_id
-                JOIN hospital_pages hp ON hpl.hospital_page_id = hp.id
-                WHERE hp.hospital_name = %s
-            )
-            INSERT INTO wait_times (hospital_id, wait_time)
-            SELECT id, %s FROM hospital_ids
-        """, (hospital_name, wait_time))
-        if cursor.rowcount == 0:
-            logger.warning(f"No matching hospital found for {hospital_name}")
+        # Update the database
+        result = hospital_data_service.update_wait_times(cursor, hospital_identifier, wait_time, is_live=True)
+        
+        if result:
+            logger.info(f"Updated live wait time for {hospital_identifier}")
+            # Attempt to broadcast the update, but don't let it block or crash the process
+            try:
+                broadcast_wait_time_update(hospital_identifier, wait_time, is_live=True)
+            except Exception as broadcast_error:
+                logger.error(f"Failed to broadcast wait time update: {broadcast_error}")
         else:
-            logger.info(f"Updated wait time for {hospital_name}")
-    except Exception as e:
-        logger.error(f"Error updating wait time for {hospital_name}: {e}")
-        raise
+            logger.warning(f"No matching hospital found for {hospital_identifier}")
 
-def populate_hospital_pages(cursor, hospital_pages_data):
-    for name, url, num in hospital_pages_data:
-        cursor.execute("""
-            INSERT INTO hospital_pages (hospital_name, url, hospital_num)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (hospital_name) DO UPDATE SET
-                url = EXCLUDED.url,
-                hospital_num = EXCLUDED.hospital_num
-        """, (name, url, num))
-    logger.info(f"Populated {len(hospital_pages_data)} hospital pages")
+    except Exception as e:
+        logger.error(f"Error updating wait time for {hospital_identifier}: {e}")
+        raise
 
 def verify_data_insertion(cursor):
     cursor.execute("SELECT COUNT(*) FROM hospitals")
@@ -240,22 +241,10 @@ def run_sync_cms_data_task(last_run_time):
     logger.info("Starting CMS data sync task")
     try:
         with get_db_cursor() as cursor:
-            hospitals = hospital_data_service.get_all_hospitals()
-            progress = hospital_data_service.load_progress()
-            start_index = progress['last_processed_index']
-
-            hospitals_to_process = hospitals[start_index:]
-            processed_hospitals = hospital_data_service.process_hospitals(hospitals_to_process, last_run_time)
-
-            if processed_hospitals:
-                hospital_data_service.bulk_upsert_hospitals(cursor, processed_hospitals)
-            
-            # Reset progress after successful completion
-            hospital_data_service.save_progress(0)
-        
+            hospital_data_service.sync_cms_data(cursor, last_run_time)
         logger.info("CMS data sync task completed successfully")
     except Exception as e:
-        logger.error(f"Error in CMS data sync task: {str(e)}")
+        logger.error(f"Error in CMS data sync task: {str(e)}", exc_info=True)
         raise
 
 def main():
@@ -291,16 +280,11 @@ def main():
             logger.info("Starting CMS data sync task")
             task = run_task_in_background(run_sync_cms_data_task, last_run_time)
             
-            if sys.platform == 'darwin':
-                # If on macOS, wait for the thread to complete
-                task.join()
-            else:
-                # If using RQ, log the job ID
-                logger.info(f"Enqueued CMS data sync job with ID: {task.id}")
+            task.join()
 
-            logger.info("Starting hospital matching process")
-            hospital_data_service.match_hospitals(cursor)
-            logger.info("Hospital matching completed")
+            # Fetch all database hospitals for later matching
+            database_hospitals = hospital_data_service.get_all_database_hospitals(cursor)
+            logger.info(f"Fetched {len(database_hospitals)} hospitals from database for matching")
 
             # Initialize WebDriver
             logger.info("Initializing WebDriver")
@@ -318,12 +302,12 @@ def main():
             logger.info(f"Fetched {len(rows)} hospital pages")
 
             for row in rows:
-                url, hospital_name, hospital_num = row  # Correct order of unpacking
+                url, hospital_name, hospital_num = row
                 logger.info(f"Processing network: {hospital_name}, URL: {url}")
                 try:
                     driver.get(url)
                     logger.info(f"Loaded URL: {url}")
-                    time.sleep(5)  # Wait for the page to load completely
+                    time.sleep(5)
 
                     img = capture_full_page_screenshot(driver)
                     logger.info(f"Captured full-page screenshot for URL: {url}")
@@ -332,18 +316,26 @@ def main():
                     logger.info("Encoded screenshot to base64")
 
                     extracted_data = get_wait_times_from_image(OPENAI_API_KEY, base64_image, hospital_name, hospital_num, detail='high')
+                    print(extracted_data)
                     logger.info("Extracted wait times from image")
 
-                    wait_times = parse_extracted_data(extracted_data, hospital_name)
+                    extracted_hospitals = parse_extracted_data(extracted_data, hospital_name)
 
-                    if not wait_times:
+                    if not extracted_hospitals:
                         logger.warning(f"No wait times extracted for URL: {url}")
                         continue
 
-                    logger.info(f"Updating wait times for network: {hospital_name}")
-                    for hospital_name, _, wait_time in wait_times:
-                        update_wait_times(cursor, hospital_name, wait_time)
-                    logger.info(f"Stored wait times for network: {hospital_name}")
+                    logger.info(f"Matching extracted hospitals with database for network: {hospital_name}")
+                    matched_pairs = hospital_data_service.match_hospitals_from_screenshot(extracted_hospitals, database_hospitals, hospital_name)
+
+                    for pair in matched_pairs:
+                        extracted_hospital = pair['extracted']
+                        matched_hospital = pair['matched']
+                        match_score = pair['score']
+                        logger.info(f"Matched {extracted_hospital['hospital_name']} to {matched_hospital['facility_name']} with score {match_score}")
+                        update_wait_times(cursor, matched_hospital['id'], extracted_hospital['wait_time'])
+
+                    logger.info(f"Completed processing for network: {hospital_name}")
 
                 except Exception as e:
                     logger.error(f"Error processing URL {url}: {str(e)}")
