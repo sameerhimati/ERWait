@@ -444,7 +444,8 @@ class HospitalDataService:
     def get_hospitals_paginated(self, page=1, per_page=50, search_term=None, lat=0, lon=0, radius=0):
         offset = (page - 1) * per_page
         query = """
-            SELECT id, facility_name, address, city, state, zip_code, latitude, longitude, has_live_wait_time
+            SELECT id, facility_name, address, city, state, zip_code, latitude, longitude, 
+                   wait_time, has_live_wait_time, has_wait_time_data
             FROM hospitals
             WHERE (%s IS NULL OR facility_name ILIKE %s OR address ILIKE %s)
             AND (
@@ -489,12 +490,29 @@ class HospitalDataService:
                 hospitals = cursor.fetchall()
         
         result = {
-            'hospitals': [dict(zip(['id', 'facility_name', 'address', 'city', 'state', 'zip_code', 'latitude', 'longitude', 'has_live_wait_time'], hospital)) for hospital in hospitals],
+            'hospitals': []
+        }
+
+        for hospital in hospitals:
+            hospital_dict = dict(zip(['id', 'facility_name', 'address', 'city', 'state', 'zip_code', 'latitude', 'longitude', 'wait_time', 'has_live_wait_time', 'has_wait_time_data'], hospital))
+            
+            # Sanitize wait_time
+            if hospital_dict['wait_time'] in ['Hospital address not found', 'N/A', None, '']:
+                hospital_dict['wait_time'] = None
+            else:
+                try:
+                    hospital_dict['wait_time'] = int(hospital_dict['wait_time'])
+                except ValueError:
+                    hospital_dict['wait_time'] = None
+
+            result['hospitals'].append(hospital_dict)
+
+        result.update({
             'total_count': total_count,
             'page': page,
             'per_page': per_page,
             'total_pages': (total_count + per_page - 1) // per_page
-        }
+        })
         
         debug_info = {
             'query': query,

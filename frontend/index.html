@@ -3,51 +3,65 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HealthGuide</title>
+    <title>ER Wait Times & Price Comparison</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link rel="stylesheet" href="/css/styles.css">
-    <script src="https://maps.googleapis.com/maps/api/js?key={{ google_maps_api_key }}&libraries=places,geometry" defer></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js" integrity="sha512-q/dWJ3kcmjBLU4Qc47E4A9kTB4m3wuTY7vkFJDTZKjTs8jhyGQnaUrxa0Ytd0ssMZhbNua9hE+E7Qv1j+DyZwA==" crossorigin="anonymous"></script>
-    <script src="/js/main.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.js"></script>
+    <!-- <script type="text/javascript" charset="utf-8">
+        var socket = io();
+        socket.on('connect', function() {
+            socket.emit('my event', {data: 'I\'m connected!'});
+        });
+    </script> -->
+    
 </head>
-<body>
-    <nav>
-        <ul>
-            <li><a href="#map" class="nav-link" data-page="map">Hospital Map</a></li>
-            <li><a href="#chat" class="nav-link" data-page="chat">Healthcare Chat</a></li>
-            <li><a href="#price-comparison" class="nav-link" data-page="price-comparison">Treatment Price Comparison</a></li>
-        </ul>
-    </nav>
+<body class="bg-gray-100">
+    <div id="app" class="container mx-auto px-4 py-8">
+        <h1 id="er-wait-times-price-comparison" class="text-3xl font-bold mb-8 text-center">ER Wait Times & Price Comparison</h1>
 
-    <main id="app">
-        <section id="map-page" class="page">
-            <h1>Hospital Map</h1>
-            <div id="map"></div>
-            <div id="loading" style="display: none;">Loading...</div>
-            <div id="error" style="display: none;"></div>
-        </section>
+        <nav class="mb-8">
+            <ul class="flex justify-center space-x-4">
+                <li><a href="#map-section" class="nav-link" data-section="map">Hospital Map</a></li>
+                <li><a href="#price-comparison-section" class="nav-link" data-section="price-comparison">Price Comparison</a></li>
+            </ul>
+        </nav>
 
-        <section id="chat-page" class="page" style="display: none;">
-            <h1>Healthcare Chat</h1>
-            <div id="chat-container">
-                <div id="chat-messages"></div>
-                <form id="chat-form">
-                    <input type="text" id="user-input" placeholder="Type your message...">
-                    <button type="submit">Send</button>
-                </form>
+        <section id="map-section" class="section">
+            <div id="nearest-er" class="bg-white rounded-lg shadow-md p-6 mb-8">
+                <h2 id="nearest-er-with-shortest-wait-time" class="text-xl font-semibold mb-4">Nearest ER with Shortest Wait Time</h2>
+                <div id="nearest-er-info" class="text-lg"></div>
             </div>
+
+            <div id="map-container" class="bg-white rounded-lg shadow-md p-6">
+                <div id="map" class="h-96 w-full"></div>
+            </div>
+
+            <div id="loading" class="hidden">Loading...</div>
+            <div id="error" class="hidden"></div>
         </section>
 
-        <section id="price-comparison-page" class="page" style="display: none;">
-            <h1>Treatment Price Comparison</h1>
-            <div id="price-comparison-container">
-                <form id="price-comparison-form">
-                    <input type="text" id="zip-code" placeholder="Enter ZIP code">
-                    <input type="text" id="treatment" placeholder="Enter treatment">
-                    <button type="submit">Compare</button>
+        <section id="price-comparison-section" class="section hidden">
+            <div id="price-comparison-container" class="bg-white rounded-lg shadow-md p-6">
+                <h2 id="treatment-price-comparison" class="text-xl font-semibold mb-4">Treatment Price Comparison</h2>
+                <form id="price-comparison-form" class="mb-4">
+                    <div class="mb-4">
+                        <label for="zip-code" class="block mb-2">ZIP Code:</label>
+                        <input type="text" id="zip-code" name="zip-code" required class="w-full p-2 border rounded">
+                    </div>
+                    <div class="mb-4">
+                        <label for="treatment" class="block mb-2">Treatment:</label>
+                        <input type="text" id="treatment" name="treatment" required class="w-full p-2 border rounded">
+                    </div>
+                    <button type="submit" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">Compare Prices</button>
                 </form>
                 <div id="results-container"></div>
             </div>
         </section>
-    </main>
+    </div>
+
+    <script async defer src="https://maps.googleapis.com/maps/api/js?key={{ google_maps_api_key }}&libraries=geometry&callback=initMap" async defer></script>
+    <!-- <script src="/socket.io/socket.io.js"></script> -->
+    <script src="/js/main.js"></script>
+    <script src="/js/price-comparison.js"></script>
 </body>
 </html>

@@ -2,20 +2,26 @@ from flask_socketio import SocketIO, emit
 from flask import request
 from hospital_data_service import hospital_data_service
 from logger_setup import logger
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.NotOpenSSLWarning)
+
+from flask_socketio import SocketIO, emit
+from hospital_data_service import hospital_data_service
+from logger_setup import logger
 
 socketio = SocketIO()
 
 @socketio.on('connect')
 def handle_connect():
-    print('Client connected')
+    logger.info('Client connected')
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print('Client disconnected')
+    logger.info('Client disconnected')
 
 @socketio.on('request_initial_data')
 def handle_initial_data_request(data):
-    # Fetch initial data for the client
+    logger.info('Received request for initial data')
     hospitals = hospital_data_service.get_hospitals_paginated(
         page=1, 
         per_page=50, 
@@ -37,5 +43,5 @@ def broadcast_wait_time_update(hospital_id, new_wait_time, is_live):
         logger.error(f"Failed to broadcast wait time update: {e}")
 
 def init_socketio(app):
-    socketio.init_app(app)
+    socketio.init_app(app, cors_allowed_origins="*")
     return socketio

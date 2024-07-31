@@ -13,13 +13,17 @@ from logger_setup import logger
 app = Flask(__name__, 
             static_folder=os.path.abspath('../frontend'),
             template_folder=os.path.abspath('../frontend'))
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 socketio = init_socketio(app)
 
 def get_db_connection():
     return psycopg2.connect(
         dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
     )
+
+@app.route('/styles.css')
+def serve_css():
+    return send_from_directory(app.static_folder, 'css/styles.css', mimetype='text/css')
 
 @app.route('/api/hospitals', methods=['GET'])
 def get_hospitals():
@@ -35,6 +39,15 @@ def get_hospitals():
         
         result, debug_info = hospital_data_service.get_hospitals_paginated(page, per_page, search_term, lat, lon, radius)
         
+        # Process the data to match our new schema
+        for hospital in result['hospitals']:
+            if not hospital['has_wait_time_data']:
+                hospital['wait_time'] = None
+            elif hospital['wait_time'] is None or hospital['wait_time'] == '':
+                hospital['wait_time'] = 'N/A'
+            else:
+                hospital['wait_time'] = int(hospital['wait_time'])
+        
         logger.debug(f"SQL Query: {debug_info['query']}")
         logger.debug(f"SQL Parameters: {debug_info['params']}")
         logger.debug(f"Fetched {len(result['hospitals'])} hospitals")
@@ -44,12 +57,6 @@ def get_hospitals():
         logger.error(f"Invalid parameters: {str(e)}")
         return jsonify({"error": "Invalid parameters"}), 400
 
-@app.route('/api/chat', methods=['POST'])
-def chat():
-    user_input = request.json.get('message')
-    # Implement chat logic here
-    response = f"You said: {user_input}"
-    return jsonify({"response": response})
 
 @app.route('/api/price-comparison', methods=['POST'])
 def price_comparison():
@@ -63,6 +70,10 @@ def price_comparison():
 @app.route('/<path:path>')
 def serve_frontend(path):
     if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
+        if path.endswith('.js'):
+            return send_from_directory(app.static_folder, path, mimetype='application/javascript')
+        elif path.endswith('.css'):
+            return send_from_directory(app.static_folder, path, mimetype='text/css')
         return send_from_directory(app.static_folder, path)
     else:
         return render_template('index.html', google_maps_api_key=GOOGLE_MAPS_API_KEY)
