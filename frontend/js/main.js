@@ -159,39 +159,41 @@ function updateMarkerWaitTime(hospitalId, newWaitTime, isLive) {
     }
   }
 
-function fetchHospitals() {
-  if (isLoading || !hasMoreData) return;
-
-  isLoading = true;
-  showLoading();
-
-  const bounds = map.getBounds();
-  const center = map.getCenter();
-  const ne = bounds.getNorthEast();
-
-  // Calculate radius in miles
-  const radius = google.maps.geometry.spherical.computeDistanceBetween(center, ne) / 1609.34;
-
-  const url = `${API_URL}/hospitals?lat=${center.lat()}&lon=${center.lng()}&radius=${radius}&page=${currentPage}&per_page=50`;
-  console.log('Fetching hospitals from:', url);
-
-  fetch(url)
-    .then(response => response.json())
-    .then((data) => {
-      console.log('Received hospital data:', data);
-      addMarkersToMap(data.hospitals);
-      currentPage++;
-      hasMoreData = currentPage <= data.total_pages;
-      isLoading = false;
-      hideLoading();
-    })
-    .catch((error) => {
-      console.error('Error fetching hospital data:', error);
-      showError('Failed to fetch hospital data. Please try again later.');
-      isLoading = false;
-      hideLoading();
-    });
-}
+  function fetchHospitals() {
+    if (isLoading || !hasMoreData) return;
+  
+    isLoading = true;
+    showLoading();
+  
+    const bounds = map.getBounds();
+    const center = map.getCenter();
+    const ne = bounds.getNorthEast();
+  
+    // Calculate radius in miles
+    const radius = google.maps.geometry.spherical.computeDistanceBetween(center, ne) / 1609.34;
+  
+    const url = `${API_URL}/hospitals?lat=${center.lat()}&lon=${center.lng()}&radius=${radius}&page=${currentPage}&per_page=50`;
+    console.log('Fetching hospitals from:', url);
+  
+    fetch(url)
+      .then(response => response.json())
+      .then((data) => {
+        console.log('Received hospital data:', data);
+        addMarkersToMap(data.hospitals);
+        updateNearestER(data.hospitals); // Call updateNearestER here
+        currentPage++;
+        hasMoreData = currentPage <= data.total_pages;
+        isLoading = false;
+        hideLoading();
+      })
+      .catch((error) => {
+        console.error('Error fetching hospital data:', error);
+        showError('Failed to fetch hospital data. Please try again later.');
+        isLoading = false;
+        hideLoading();
+      });
+  }
+  
 
 function createCustomMarkerIcon(color, hasData) {
   const svg = `
@@ -267,76 +269,78 @@ function addMarkersToMap(hospitals) {
 }
 
 function createInfoWindow(hospital, position) {
-  const hasData =
-    hospital.wait_time !== null && hospital.wait_time !== undefined;
-  const isLive = hospital.has_live_wait_time;
-  const waitTime = hasData ? hospital.wait_time : null;
-
-  let distanceText = '';
-  let travelText = '';
-  if (userLocation) {
-    const distance = google.maps.geometry.spherical.computeDistanceBetween(
-      userLocation,
-      position
-    );
-    const distanceMiles = (distance * 0.000621371).toFixed(2); // Convert meters to miles
-    distanceText = `<p>Distance: ${distanceMiles} miles</p>`;
-    travelText = calculateTravelTime(
-      userLocation,
-      position,
-      `travel-time-${hospital.id}`
-    );
+    const hasData =
+      hospital.wait_time !== null && hospital.wait_time !== undefined;
+    const isLive = hospital.has_live_wait_time;
+    const waitTime = hasData ? hospital.wait_time : null;
+  
+    let distanceText = '';
+    let travelTimeId = `travel-time-${hospital.id}`;
+  
+    if (userLocation) {
+      const distance = google.maps.geometry.spherical.computeDistanceBetween(
+        userLocation,
+        position
+      );
+      const distanceMiles = (distance * 0.000621371).toFixed(2); // Convert meters to miles
+      distanceText = `<p>Distance: ${distanceMiles} miles</p>`;
+    }
+  
+    const content = `
+      <div style='max-width: 300px;'>
+        <h3>${hospital.facility_name}</h3>
+        <p>${hospital.address}, ${hospital.city}, ${hospital.state} ${hospital.zip_code}</p>
+        ${
+          hasData
+            ? isLive
+              ? `<p>Current wait time: ${waitTime} minutes</p>`
+              : `<p>Historic average wait time: ${waitTime} minutes (CMS dataset Historical Average)</p>`
+            : '<p>Wait time: Not available</p>'
+        }
+        ${hospital.phone_number ? `<p>Phone: ${hospital.phone_number}</p>` : ''}
+        ${
+          hospital.website
+            ? `<p>Website: <a href='${hospital.website}' target='_blank'>${hospital.website}</a></p>`
+            : ''
+        }
+        ${distanceText}
+        <p>Travel time: <span id='${travelTimeId}'>Calculating...</span></p>
+        <button onclick='openDirections(${position.lat()}, ${position.lng()})'>Get Directions</button>
+      </div>
+    `;
+  
+    const infoWindow = new google.maps.InfoWindow({ content });
+  
+    // Calculate travel time after the InfoWindow is opened
+    infoWindow.addListener('domready', () => {
+      if (userLocation) {
+        calculateTravelTime(userLocation, position, travelTimeId);
+      }
+    });
+  
+    return infoWindow;
   }
 
-  const content = `
-        <div style='max-width: 300px;'>
-            <h3>${hospital.facility_name}</h3>
-            <p>${hospital.address}, ${hospital.city}, ${hospital.state} ${
-    hospital.zip_code
-  }</p>
-            ${
-              hasData
-                ? isLive
-                  ? `<p>Current wait time: ${waitTime} minutes</p>`
-                  : `<p>Historic average wait time: ${waitTime} minutes (CMS dataset Historical Average)</p>`
-                : '<p>Wait time: Not available</p>'
-            }
-            ${
-              hospital.phone_number
-                ? `<p>Phone: ${hospital.phone_number}</p>`
-                : ''
-            }
-            ${
-              hospital.website
-                ? `<p>Website: <a href='${hospital.website}' target='_blank'>${hospital.website}</a></p>`
-                : ''
-            }
-            ${distanceText}
-            ${travelText}
-            <button onclick='openDirections(${position.lat()}, ${position.lng()})'>Get Directions</button>
-        </div>
-    `;
-
-  return new google.maps.InfoWindow({ content });
-}
-
-function calculateTravelTime(origin, destination, elementId) {
-  const service = new google.maps.DistanceMatrixService();
-  service.getDistanceMatrix(
-    {
-      origins: [origin],
-      destinations: [destination],
-      travelMode: 'DRIVING',
-      unitSystem: google.maps.UnitSystem.IMPERIAL,
-    },
-    (response, status) => {
-      if (status === 'OK') {
-        const duration = response.rows[0].elements[0].duration.text;
-        document.getElementById(elementId).textContent = duration;
+  function calculateTravelTime(origin, destination, elementId) {
+    const service = new google.maps.DistanceMatrixService();
+    service.getDistanceMatrix(
+      {
+        origins: [origin],
+        destinations: [destination],
+        travelMode: 'DRIVING',
+        unitSystem: google.maps.UnitSystem.IMPERIAL,
+      },
+      (response, status) => {
+        if (status === 'OK') {
+          const duration = response.rows[0].elements[0].duration.text;
+          const element = document.getElementById(elementId);
+          if (element) {
+            element.textContent = duration;
+          }
+        }
       }
-    }
-  );
-}
+    );
+  }
 
 function openDirections(lat, lng) {
   const url = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
@@ -354,51 +358,42 @@ function formatWaitTime(hospital) {
 }
 
 function updateNearestER(hospitals) {
-  if (userLocation && hospitals.length > 0) {
-    const nearestHospital = hospitals.reduce(
-      (nearest, hospital) => {
-        const distance = google.maps.geometry.spherical.computeDistanceBetween(
-          userLocation,
-          new google.maps.LatLng(hospital.latitude, hospital.longitude)
-        );
-        return distance < nearest.distance ? { hospital, distance } : nearest;
-      },
-      { hospital: null, distance: Infinity }
-    ).hospital;
-
-    if (nearestHospital) {
-      const nearestERInfo = document.getElementById('nearest-er-info');
-      nearestERInfo.innerHTML = `
-                <div class='hospital-info'>
-                    <h3 class='text-xl font-semibold'>${
-                      nearestHospital.facility_name
-                    }</h3>
-                    <p>${nearestHospital.address}, ${nearestHospital.city}, ${
-        nearestHospital.state
-      } ${nearestHospital.zip_code}</p>
-                    <p>Wait time: <span class='wait-time'>${formatWaitTime(
-                      nearestHospital
-                    )}</span></p>
-                    <p>Travel time: <span id='nearest-travel-time'>Calculating...</span></p>
-                </div>
-                <a href='https://www.google.com/maps/dir/?api=1&destination=${
-                  nearestHospital.latitude
-                },${
-        nearestHospital.longitude
-      }' target='_blank' class='directions-btn'>Get Directions</a>
-            `;
-
-      calculateTravelTime(
-        userLocation,
-        new google.maps.LatLng(
-          nearestHospital.latitude,
-          nearestHospital.longitude
-        ),
-        'nearest-travel-time'
-      );
+    if (userLocation && hospitals.length > 0) {
+      const nearestHospital = hospitals.reduce(
+        (nearest, hospital) => {
+          const distance = google.maps.geometry.spherical.computeDistanceBetween(
+            userLocation,
+            new google.maps.LatLng(hospital.latitude, hospital.longitude)
+          );
+          return distance < nearest.distance ? { hospital, distance } : nearest;
+        },
+        { hospital: null, distance: Infinity }
+      ).hospital;
+  
+      if (nearestHospital) {
+        const nearestERInfo = document.getElementById('nearest-er-info');
+        if (nearestERInfo) {
+          nearestERInfo.innerHTML = `
+            <div class='hospital-info'>
+              <h3 class='text-xl font-semibold'>${nearestHospital.facility_name}</h3>
+              <p>${nearestHospital.address}, ${nearestHospital.city}, ${nearestHospital.state} ${nearestHospital.zip_code}</p>
+              <p>Wait time: <span class='wait-time'>${formatWaitTime(nearestHospital)}</span></p>
+              <p>Travel time: <span id='nearest-travel-time'>Calculating...</span></p>
+            </div>
+            <a href='https://www.google.com/maps/dir/?api=1&destination=${nearestHospital.latitude},${nearestHospital.longitude}' target='_blank' class='directions-btn'>Get Directions</a>
+          `;
+  
+          calculateTravelTime(
+            userLocation,
+            new google.maps.LatLng(nearestHospital.latitude, nearestHospital.longitude),
+            'nearest-travel-time'
+          );
+        } else {
+          console.error('Element with id "nearest-er-info" not found');
+        }
+      }
     }
   }
-}
 
 function clearMarkers() {
   markers.forEach((marker) => marker.setMap(null));
