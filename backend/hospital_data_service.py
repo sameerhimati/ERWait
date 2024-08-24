@@ -12,6 +12,8 @@ from helpers.config import DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 from logger_setup import logger
 import multiprocessing
 from dateutil import parser
+from geopy.distance import geodesic
+import requests
 
 def parse_date(date_string):
     try:
@@ -66,6 +68,26 @@ class HospitalDataService:
         self.geolocator = None
         self.geocode_cache = {}
         self.load_geocode_cache()
+
+    def get_coordinates(self, address):
+        base_url = "https://maps.googleapis.com/maps/api/geocode/json"
+        api_key = os.getenv('GOOGLE_MAPS_API_KEY')
+        
+        params = {
+            "address": address,
+            "key": api_key
+        }
+        
+        response = requests.get(base_url, params=params)
+        data = response.json()
+        
+        if data["status"] == "OK":
+            location = data["results"][0]["geometry"]["location"]
+            return (location["lat"], location["lng"])
+        else:
+            logger.warning(f"Geocoding failed for address: {address}")
+            return None
+
 
     def init_geolocator(self):
         self.geolocator = Nominatim(user_agent="hospital_matcher", timeout=10)
@@ -346,9 +368,9 @@ class HospitalDataService:
             cursor.connection.commit()
 
     def match_hospitals_from_screenshot(self, extracted_hospitals, database_hospitals, network_name):
-        start_time = time.time()
         matched_pairs = []
         matched_db_hospitals = set()
+        start_time = time.time()
         logger.info(f"Starting matching process for {len(extracted_hospitals)} extracted hospitals against {len(database_hospitals)} database hospitals")
         
         for i, extracted_hospital in enumerate(extracted_hospitals):
@@ -356,68 +378,61 @@ class HospitalDataService:
             best_score = 0
             logger.info(f"Processing extracted hospital {i+1}/{len(extracted_hospitals)}: {extracted_hospital['hospital_name']}")
             
-            # Prepare the extracted name for matching
             extracted_name = extracted_hospital['hospital_name'].lower()
-            extracted_name_without_network = extracted_name.replace(network_name.lower(), '').strip()
+            extracted_address = extracted_hospital['address'].lower()
+            
+            # Get coordinates for extracted hospital
+            extracted_coords = self.get_coordinates(f"{extracted_name}, {extracted_address}")
             
             for j, db_hospital in enumerate(database_hospitals):
                 if db_hospital['id'] in matched_db_hospitals:
                     continue  # Skip already matched hospitals
                 
                 db_name = db_hospital['facility_name'].lower()
+                db_address = f"{db_hospital['address']}, {db_hospital['city']}, {db_hospital['state']} {db_hospital['zip_code']}".lower()
                 
-                # Tier 1: Exact match (case-insensitive)
-                if extracted_name == db_name:
-                    best_match = db_hospital
-                    best_score = 100
-                    break
-                
-                # Tier 2: Network name + hospital name match
-                if network_name.lower() in db_name and extracted_name_without_network in db_name:
-                    score = 95
-                    if score > best_score:
-                        best_match = db_hospital
-                        best_score = score
-                        continue
-                
-                # Tier 3: Fuzzy matching
+                # Calculate various similarity scores
                 name_score = fuzz.token_set_ratio(extracted_name, db_name)
-                address_score = fuzz.token_set_ratio(extracted_hospital['address'], db_hospital['address'])
-                city_state_score = fuzz.token_set_ratio(
-                    f"{db_hospital['city']} {db_hospital['state']}",
-                    f"{extracted_hospital['hospital_name']} {extracted_hospital['address']}"
+                address_score = fuzz.token_set_ratio(extracted_address, db_address)
+                network_score = fuzz.partial_ratio(network_name.lower(), db_name) * 0.1
+                
+                # Calculate geographic distance if coordinates are available
+                distance_score = 0
+                if db_hospital['latitude'] and db_hospital['longitude'] and extracted_coords:
+                    try:
+                        distance = geodesic(extracted_coords, (db_hospital['latitude'], db_hospital['longitude'])).miles
+                        distance_score = max(0, 100 - distance)  # 100 points for 0 miles, decreasing as distance increases
+                    except Exception as e:
+                        logger.warning(f"Error calculating distance: {e}")
+                
+                # Calculate weighted total score
+                total_score = (
+                    (name_score * 0.4) +
+                    (address_score * 0.3) +
+                    (network_score * 0.1) +
+                    (distance_score * 0.2)
                 )
-                
-                # Weighted scoring
-                total_score = (name_score * 0.5) + (city_state_score * 0.3) + (address_score * 0.2)
-                
-                # Bonus for network name presence
-                if network_name.lower() in db_name:
-                    total_score += 10
                 
                 if total_score > best_score:
                     best_score = total_score
                     best_match = db_hospital
             
             # Determine if the match is good enough
-            if best_match:
-                if best_score >= 90:
-                    matched_pairs.append({
-                        'extracted': extracted_hospital,
-                        'matched': best_match,
-                        'score': best_score
-                    })
-                    matched_db_hospitals.add(best_match['id'])
-                    logger.info(f"Matched {extracted_hospital['hospital_name']} to {best_match['facility_name']} with score {best_score}")
-                else:
-                    logger.warning(f"Low confidence match for {extracted_hospital['hospital_name']} to {best_match['facility_name']} with score {best_score}")
+            if best_match and best_score >= 70:  # Increased threshold
+                matched_pairs.append({
+                    'extracted': extracted_hospital,
+                    'matched': best_match,
+                    'score': best_score
+                })
+                matched_db_hospitals.add(best_match['id'])
+                logger.info(f"Matched {extracted_hospital['hospital_name']} to {best_match['facility_name']} with score {best_score}")
             else:
-                logger.warning(f"No match found for {extracted_hospital['hospital_name']}")
+                logger.warning(f"No confident match found for {extracted_hospital['hospital_name']}. Best score: {best_score}")
         
         end_time = time.time()
         logger.info(f"Matching process completed in {end_time - start_time:.2f} seconds")
         return matched_pairs
-    
+
     def fetch_hospital_network_data(self):
         try:
             with self.get_db_connection() as conn:
